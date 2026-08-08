@@ -39,7 +39,7 @@ class AdminState:
         return {
             "valid": True,
             "configuration": candidate,
-            "restart_required": bool({"max_length"} & patch.model_fields_set),
+            "restart_required": False,
             "memory_warning": memory_warning,
         }
 

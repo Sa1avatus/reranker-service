@@ -106,5 +106,12 @@ class ModelRuntime:
             )
             return result
 
+    def reconfigure(self, *, max_concurrency: int, max_length: int) -> None:
+        self._semaphore = asyncio.Semaphore(max_concurrency)
+        self.settings.max_concurrency = max_concurrency
+        self.settings.max_length = max_length
+        if self.model is not None and not isinstance(self.model, str):
+            self.model.max_length = max_length
+
     def close(self) -> None:
         self._executor.shutdown(wait=False, cancel_futures=True)

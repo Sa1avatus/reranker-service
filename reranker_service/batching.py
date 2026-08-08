@@ -38,6 +38,12 @@ class DynamicBatcher:
         if self.settings.dynamic_batching and self._worker is None:
             self._worker = asyncio.create_task(self._run(), name="reranker-micro-batcher")
 
+    async def reconfigure(self) -> None:
+        if self.settings.dynamic_batching and self._worker is None:
+            await self.start()
+        elif not self.settings.dynamic_batching and self._worker is not None:
+            await self.close()
+
     async def close(self) -> None:
         if self._worker is not None:
             self._worker.cancel()

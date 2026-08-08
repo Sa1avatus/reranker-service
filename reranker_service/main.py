@@ -18,7 +18,14 @@ from .config import Settings, get_settings
 from .errors import ServiceError, service_error_handler
 from .metrics import ERRORS, HTTP_DURATION, HTTP_REQUESTS, IN_PROGRESS
 from .runtime import ModelRuntime
-from .schemas import BatchRequest, BatchResponse, RerankRequest, RerankResponse, RuntimePatch
+from .schemas import (
+    BatchRequest,
+    BatchResponse,
+    CachePatch,
+    RerankRequest,
+    RerankResponse,
+    RuntimePatch,
+)
 from .security import Security
 from .service import RerankService
 
@@ -205,6 +212,14 @@ def create_app(settings: Settings | None = None, *, load_model: bool = True) -> 
             "recent_requests": list(admin.requests)[:10],
         }
 
+    @app.post("/v1/admin/rerank", response_model=RerankResponse, dependencies=admin_deps)
+    async def admin_rerank(body: RerankRequest) -> RerankResponse:
+        return await rerank(body)
+
+    @app.post("/v1/admin/rerank/batch", response_model=BatchResponse, dependencies=admin_deps)
+    async def admin_rerank_batch(body: BatchRequest) -> BatchResponse:
+        return await rerank_batch(body)
+
     @app.get("/v1/admin/metrics/timeseries", dependencies=admin_deps)
     async def timeseries() -> dict[str, Any]:
         return {"points": [], "generated_at": time.time()}
@@ -215,7 +230,16 @@ def create_app(settings: Settings | None = None, *, load_model: bool = True) -> 
 
     @app.patch("/v1/admin/runtime", dependencies=admin_deps)
     async def patch_runtime(body: RuntimePatch) -> dict[str, Any]:
-        return admin.apply(body)
+        result = admin.apply(body)
+        updates = body.model_dump(exclude_none=True)
+        for name, value in updates.items():
+            setattr(cfg, name, value)
+        runtime.reconfigure(
+            max_concurrency=cfg.max_concurrency,
+            max_length=cfg.max_length,
+        )
+        await batcher.reconfigure()
+        return result
 
     @app.post("/v1/admin/runtime/validate", dependencies=admin_deps)
     async def validate_runtime(body: RuntimePatch) -> dict[str, Any]:
@@ -263,12 +287,13 @@ def create_app(settings: Settings | None = None, *, load_model: bool = True) -> 
         }
 
     @app.patch("/v1/admin/cache", dependencies=admin_deps)
-    async def cache_patch(body: dict[str, Any]) -> dict[str, Any]:
-        if "enabled" in body:
-            cfg.cache_enabled = bool(body["enabled"])
-        if "ttl_seconds" in body:
-            cfg.cache_ttl_seconds = int(body["ttl_seconds"])
-        admin.record("cache.updated", body)
+    async def cache_patch(body: CachePatch) -> dict[str, Any]:
+        updates = body.model_dump(exclude_none=True)
+        if "enabled" in updates:
+            cfg.cache_enabled = updates["enabled"]
+        if "ttl_seconds" in updates:
+            cfg.cache_ttl_seconds = updates["ttl_seconds"]
+        admin.record("cache.updated", updates)
         return await cache_status()
 
     @app.post("/v1/admin/cache/clear", dependencies=admin_deps)

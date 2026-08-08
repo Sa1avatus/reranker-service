@@ -73,3 +73,15 @@ class RuntimePatch(BaseModel):
         if not self.model_fields_set:
             raise ValueError("at least one setting is required")
         return self
+
+
+class CachePatch(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    enabled: bool | None = None
+    ttl_seconds: int | None = Field(None, ge=1, le=2_592_000)
+
+    @model_validator(mode="after")
+    def non_empty(self) -> "CachePatch":
+        if not self.model_fields_set:
+            raise ValueError("at least one cache setting is required")
+        return self
