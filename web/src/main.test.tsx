@@ -103,4 +103,25 @@ describe('administrative controls', () => {
     expect(screen.queryByText('private document')).toBeNull();
     vi.unstubAllGlobals();
   });
+
+  it('submits multiple independent batch requests', async () => {
+    sessionStorage.setItem('adminToken', 'admin-secret');
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: async () => ({
+      responses: [], total_pairs: 3, latency_ms: 1,
+    }) });
+    vi.stubGlobal('fetch', fetchMock);
+    render(<QueryClientProvider client={new QueryClient()}><App /></QueryClientProvider>);
+    fireEvent.click(screen.getByRole('button', { name: 'Batch Playground' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Add request' }));
+    fireEvent.change(screen.getByLabelText('Batch query 2'), { target: { value: 'Python' } });
+    fireEvent.change(screen.getByLabelText('Batch documents 2'), {
+      target: { value: 'Python backend experience' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Run batch' }));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith('/v1/admin/rerank/batch',
+      expect.objectContaining({ method: 'POST', body: expect.stringContaining('Python') })));
+    const call = fetchMock.mock.calls.find(([url]) => url === '/v1/admin/rerank/batch');
+    expect(JSON.parse(call?.[1]?.body as string).requests).toHaveLength(2);
+    vi.unstubAllGlobals();
+  });
 });

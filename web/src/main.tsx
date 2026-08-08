@@ -74,6 +74,59 @@ function Playground({ token, batch = false }: { token: string; batch?: boolean }
   </section>;
 }
 
+type BatchItem = { key: number; query: string; documents: string; topN: number };
+
+function BatchPlayground({ token }: { token: string }) {
+  const [nextKey, setNextKey] = useState(2);
+  const [items, setItems] = useState<BatchItem[]>([{
+    key: 1, query: 'Kubernetes experience',
+    documents: 'Production Kubernetes operations\nMicrosoft SQL Server administration', topN: 2,
+  }]);
+  const mutation = useMutation({ mutationFn: () => api<Record<string, unknown>>(
+    'admin/rerank/batch', token, { method: 'POST', body: JSON.stringify({ requests: items.map((item) => ({
+      query: item.query,
+      documents: item.documents.split('\n').filter(Boolean).slice(0, 100).map((text, index) => ({
+        id: `request-${item.key}-doc-${index + 1}`, text,
+      })),
+      top_n: item.topN, return_documents: true, truncate: true,
+    })) }) },
+  ) });
+  const update = (key: number, patch: Partial<BatchItem>) => setItems(
+    items.map((item) => item.key === key ? { ...item, ...patch } : item),
+  );
+  const totalPairs = items.reduce((total, item) =>
+    total + item.documents.split('\n').filter(Boolean).length, 0);
+  const exportResult = () => {
+    if (!mutation.data) return;
+    const blob = new Blob([JSON.stringify(mutation.data, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url; anchor.download = 'reranker-batch-result.json'; anchor.click();
+    URL.revokeObjectURL(url);
+  };
+  return <section><header><div><h2>Batch Playground</h2>
+    <p>{items.length}/32 requests · {totalPairs} total pairs</p></div>
+    <button disabled={items.length >= 32} onClick={() => {
+      setItems([...items, { key: nextKey, query: '', documents: '', topN: 10 }]);
+      setNextKey(nextKey + 1);
+    }}>Add request</button></header><div className="run-list">{items.map((item, index) =>
+      <article key={item.key}><header><strong>Request {index + 1}</strong>
+        <button className="danger" disabled={items.length === 1}
+          onClick={() => setItems(items.filter((candidate) => candidate.key !== item.key))}>Remove</button></header>
+        <label>Query<input aria-label={`Batch query ${index + 1}`} maxLength={8000} value={item.query}
+          onChange={(event) => update(item.key, { query: event.target.value })} /></label>
+        <label>Documents - one per line<textarea aria-label={`Batch documents ${index + 1}`} rows={5}
+          value={item.documents} onChange={(event) => update(item.key, { documents: event.target.value })} /></label>
+        <label>Top N<input aria-label={`Batch top N ${index + 1}`} type="number" min="1" max="100"
+          value={item.topN} onChange={(event) => update(item.key, { topN: Number(event.target.value) })} /></label>
+      </article>)}</div><div className="actions"><button onClick={() => mutation.mutate()}
+        disabled={mutation.isPending || totalPairs === 0}>Run batch</button>
+      <button className="secondary" disabled={!mutation.data} onClick={exportResult}>Export JSON</button></div>
+    {mutation.error && <p className="error" role="alert">{mutation.error.message}</p>}
+    {mutation.data !== undefined && <pre>{JSON.stringify(mutation.data, null, 2)}</pre>}
+  </section>;
+}
+
 type RuntimeState = {
   batch_size: number; max_concurrency: number; max_length: number;
   dynamic_batching: boolean; batch_window_ms: number; max_batch_pairs: number;
@@ -296,6 +349,55 @@ function SystemHealthPanel({ token }: { token: string }) {
   </section>;
 }
 
+function SettingsPanel({ token }: { token: string }) {
+  const runtime = useQuery({ queryKey: ['settings-runtime'],
+    queryFn: () => api<RuntimeState>('admin/runtime', token) });
+  const cache = useQuery({ queryKey: ['settings-cache'],
+    queryFn: () => api<CacheState>('admin/cache', token) });
+  const validate = useMutation({ mutationFn: () => {
+    if (!runtime.data) throw new Error('Runtime settings are not loaded');
+    const payload = {
+      batch_size: runtime.data.batch_size, max_concurrency: runtime.data.max_concurrency,
+      max_length: runtime.data.max_length, dynamic_batching: runtime.data.dynamic_batching,
+      batch_window_ms: runtime.data.batch_window_ms, max_batch_pairs: runtime.data.max_batch_pairs,
+      request_timeout_seconds: runtime.data.request_timeout_seconds,
+      default_top_n: runtime.data.default_top_n,
+    };
+    return api<{ valid: boolean; memory_warning: boolean }>('admin/runtime/validate', token, {
+      method: 'POST', body: JSON.stringify(payload),
+    });
+  } });
+  if (!runtime.data || !cache.data) return <div className="skeleton">Loading…</div>;
+  return <section><h2>Settings</h2><p>Secrets are managed externally and are never exposed here.</p>
+    <div className="cards"><article><span>Batch size</span><strong>{runtime.data.batch_size}</strong></article>
+      <article><span>Concurrency</span><strong>{runtime.data.max_concurrency}</strong></article>
+      <article><span>Max length</span><strong>{runtime.data.max_length}</strong></article>
+      <article><span>Cache TTL</span><strong>{cache.data.ttl_seconds}s</strong></article></div>
+    <button onClick={() => validate.mutate()}>Validate configuration</button>
+    {validate.data && <p className={validate.data.memory_warning ? 'warning' : 'success'}>
+      {validate.data.memory_warning ? 'Valid with elevated memory risk.' : 'Configuration is valid.'}</p>}
+    {validate.error && <p className="error" role="alert">{validate.error.message}</p>}
+  </section>;
+}
+
+type AuditRecord = { id: string; timestamp: number; action: string; details: Record<string, unknown> };
+
+function AuditLogPanel({ token }: { token: string }) {
+  const [page, setPage] = useState(1);
+  const query = useQuery({ queryKey: ['audit-log', page], queryFn: () =>
+    api<{ items: AuditRecord[]; total: number }>(`admin/audit-log?page=${page}&size=25`, token) });
+  if (!query.data) return <div className="skeleton">Loading…</div>;
+  return <section><header><h2>Audit Log</h2><span>{query.data.total} events</span></header>
+    <div className="table-wrap"><table><thead><tr><th>Time</th><th>Action</th><th>Details</th></tr></thead>
+      <tbody>{query.data.items.map((record) => <tr key={record.id}>
+        <td>{new Date(record.timestamp * 1000).toLocaleString()}</td><td>{record.action}</td>
+        <td><code>{JSON.stringify(record.details)}</code></td></tr>)}</tbody></table></div>
+    <div className="actions"><button className="secondary" disabled={page === 1}
+      onClick={() => setPage(page - 1)}>Previous</button><span>Page {page}</span>
+      <button className="secondary" disabled={page * 25 >= query.data.total}
+        onClick={() => setPage(page + 1)}>Next</button></div></section>;
+}
+
 function DataView({ section, token }: { section: Section; token: string }) {
   const endpoint = `admin/${paths[section]}`;
   const query = useQuery({ queryKey: [endpoint], queryFn: () => api(endpoint, token),
@@ -320,13 +422,15 @@ export function App() {
   let content: React.ReactNode;
   if (section === 'Dashboard') content = <DashboardPanel token={token} />;
   else if (section === 'Rerank Playground') content = <Playground token={token} />;
-  else if (section === 'Batch Playground') content = <Playground token={token} batch />;
+  else if (section === 'Batch Playground') content = <BatchPlayground token={token} />;
   else if (section === 'Runtime') content = <RuntimePanel token={token} />;
   else if (section === 'Cache') content = <CachePanel token={token} />;
   else if (section === 'Benchmarks') content = <BenchmarksPanel token={token} />;
   else if (section === 'Models') content = <ModelsPanel token={token} />;
   else if (section === 'Requests') content = <RequestsPanel token={token} />;
   else if (section === 'System Health') content = <SystemHealthPanel token={token} />;
+  else if (section === 'Settings') content = <SettingsPanel token={token} />;
+  else if (section === 'Audit Log') content = <AuditLogPanel token={token} />;
   else content = <DataView section={section} token={token} />;
   return <div className="shell"><aside><div className="brand">RR <span>Console</span></div>
     {sections.map((item) => <button className={item === section ? 'active' : ''}

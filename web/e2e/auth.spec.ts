@@ -75,3 +75,26 @@ test('admin views paginated technical request records', async ({ page }) => {
   await expect(page.getByText('test-model')).toBeVisible();
   await expect(page.getByText('1 retained technical records')).toBeVisible();
 });
+
+test('admin submits multiple requests through batch playground', async ({ page }) => {
+  await page.route('**/v1/admin/dashboard', route => route.fulfill({ json: {
+    model: { ready: true }, redis: { available: true },
+    resources: { cpu_percent: 1, ram_percent: 2, uptime_seconds: 3 },
+  } }));
+  await page.route('**/v1/admin/metrics/timeseries**', route => route.fulfill({ json: { points: [] } }));
+  await page.route('**/v1/admin/rerank/batch', route => route.fulfill({
+    json: { responses: [], total_pairs: 3, latency_ms: 1 },
+  }));
+  await page.goto('/');
+  await page.getByLabel('Admin token').fill('test-admin-token');
+  await page.getByRole('button', { name: 'Sign in' }).click();
+  await page.getByRole('button', { name: 'Batch Playground' }).click();
+  await page.getByRole('button', { name: 'Add request' }).click();
+  await page.getByLabel('Batch query 2').fill('Python experience');
+  await page.getByLabel('Batch documents 2').fill('Python backend experience');
+  const requestPromise = page.waitForRequest('**/v1/admin/rerank/batch');
+  await page.getByRole('button', { name: 'Run batch' }).click();
+  const payload = (await requestPromise).postDataJSON();
+  expect(payload.requests).toHaveLength(2);
+  await expect(page.getByRole('button', { name: 'Export JSON' })).toBeEnabled();
+});
