@@ -90,9 +90,31 @@ def test_admin_operational_endpoints(client, admin_auth):
 
 
 def test_admin_playground_uses_admin_token_not_service_key(client, admin_auth, payload):
-    response = client.post("/v1/admin/rerank", json=payload, headers=admin_auth)
+    headers = admin_auth | {"x-correlation-id": "correlation-123"}
+    response = client.post("/v1/admin/rerank", json=payload, headers=headers)
     assert response.status_code == 200
     assert response.json()["results"][0]["id"] == "k8s-id"
+    recorded = client.get("/v1/admin/requests", headers=admin_auth).json()["items"][0]
+    assert recorded["correlation_id"] == "correlation-123"
+    assert recorded["pairs_count"] == 2
+    assert "query" not in recorded
+    assert "text" not in recorded
+
+
+def test_request_filters_and_batch_accounting(client, admin_auth, auth, payload):
+    batch = client.post(
+        "/v1/rerank/batch",
+        json={"requests": [payload, payload]},
+        headers=auth | {"x-correlation-id": "batch-correlation"},
+    )
+    assert batch.status_code == 200
+    records = client.get(
+        "/v1/admin/requests?page=1&size=1&status=success&min_latency_ms=0",
+        headers=admin_auth,
+    ).json()
+    assert records["total"] == 2
+    assert len(records["items"]) == 1
+    assert records["items"][0]["correlation_id"] == "batch-correlation"
 
 
 def test_model_allowlist_and_exclusive_confirmation(client, admin_auth):

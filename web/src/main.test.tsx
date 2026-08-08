@@ -84,4 +84,23 @@ describe('administrative controls', () => {
       expect.objectContaining({ method: 'POST', body: expect.stringContaining('low_priority') })));
     vi.unstubAllGlobals();
   });
+
+  it('renders request metadata without private payload text', async () => {
+    sessionStorage.setItem('adminToken', 'admin-secret');
+    const fetchMock = vi.fn().mockImplementation(async (url: string) => {
+      if (url.includes('/admin/requests')) return { ok: true, json: async () => ({
+        total: 1, size: 20, items: [{ request_id: 'request-123456', correlation_id: 'corr-123456789',
+          timestamp: 1, documents_count: 2, model: 'test-model', device: 'cpu', latency_ms: 8,
+          cache_hits: 1, status: 'success', truncation_count: 0 }],
+      }) };
+      return { ok: true, json: async () => ({}) };
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    render(<QueryClientProvider client={new QueryClient()}><App /></QueryClientProvider>);
+    fireEvent.click(screen.getByRole('button', { name: 'Requests' }));
+    await screen.findByText('test-model');
+    expect(screen.getByText('8ms')).toBeTruthy();
+    expect(screen.queryByText('private document')).toBeNull();
+    vi.unstubAllGlobals();
+  });
 });

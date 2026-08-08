@@ -56,3 +56,22 @@ test('admin starts a low-priority benchmark', async ({ page }) => {
   const request = await requestPromise;
   expect(request.postDataJSON()).toMatchObject({ mode: 'low_priority', multilingual: true });
 });
+
+test('admin views paginated technical request records', async ({ page }) => {
+  await page.route('**/v1/admin/dashboard', route => route.fulfill({ json: {
+    model: { ready: true }, redis: { available: true },
+    resources: { cpu_percent: 1, ram_percent: 2, uptime_seconds: 3 },
+  } }));
+  await page.route('**/v1/admin/metrics/timeseries**', route => route.fulfill({ json: { points: [] } }));
+  await page.route('**/v1/admin/requests**', route => route.fulfill({ json: {
+    total: 1, size: 20, items: [{ request_id: 'request-123456', correlation_id: 'corr-123456789',
+      timestamp: 1, documents_count: 2, model: 'test-model', device: 'cpu', latency_ms: 8,
+      cache_hits: 1, status: 'success', truncation_count: 0 }],
+  } }));
+  await page.goto('/');
+  await page.getByLabel('Admin token').fill('test-admin-token');
+  await page.getByRole('button', { name: 'Sign in' }).click();
+  await page.getByRole('button', { name: 'Requests' }).click();
+  await expect(page.getByText('test-model')).toBeVisible();
+  await expect(page.getByText('1 retained technical records')).toBeVisible();
+});

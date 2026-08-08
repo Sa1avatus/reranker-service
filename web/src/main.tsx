@@ -231,6 +231,71 @@ function DashboardPanel({ token }: { token: string }) {
   </div></section>;
 }
 
+type ModelInfo = {
+  name: string; revision: string | null; status: string; loaded: boolean;
+  device_support: string[]; max_length: number; estimated_memory_bytes: number;
+  average_latency_ms: number | null;
+};
+
+function ModelsPanel({ token }: { token: string }) {
+  const query = useQuery({ queryKey: ['models'],
+    queryFn: () => api<{ active_model: string; models: ModelInfo[] }>('admin/models', token) });
+  if (!query.data) return <div className="skeleton">Loading…</div>;
+  return <section><h2>Models</h2><div className="run-list">{query.data.models.map((model) =>
+    <article key={model.name}><header><strong>{model.name}</strong>
+      <span>{model.loaded ? 'Active · ready' : model.status}</span></header>
+      <dl className="details"><div><dt>Revision</dt><dd>{model.revision || 'Not loaded'}</dd></div>
+        <div><dt>Devices</dt><dd>{model.device_support.join(', ')}</dd></div>
+        <div><dt>Max length</dt><dd>{model.max_length}</dd></div>
+        <div><dt>Estimated memory</dt><dd>{(model.estimated_memory_bytes / 1e9).toFixed(1)} GB</dd></div>
+        <div><dt>Average latency</dt><dd>{model.average_latency_ms?.toFixed(1) || 'No data'} ms</dd></div>
+      </dl></article>)}</div></section>;
+}
+
+type RequestRecord = {
+  request_id: string; correlation_id: string; timestamp: number; documents_count: number;
+  model: string; device: string; latency_ms: number; cache_hits: number; status: string;
+  truncation_count: number;
+};
+
+function RequestsPanel({ token }: { token: string }) {
+  const [page, setPage] = useState(1);
+  const query = useQuery({ queryKey: ['requests', page],
+    queryFn: () => api<{ items: RequestRecord[]; total: number; size: number }>(
+      `admin/requests?page=${page}&size=20`, token) });
+  if (!query.data) return <div className="skeleton">Loading…</div>;
+  return <section><header><h2>Requests</h2><span>{query.data.total} retained technical records</span></header>
+    <div className="table-wrap"><table><thead><tr><th>Request</th><th>Correlation</th><th>Documents</th>
+      <th>Model / device</th><th>Latency</th><th>Cache</th><th>Status</th></tr></thead><tbody>
+      {query.data.items.map((item) => <tr key={`${item.request_id}-${item.timestamp}`}>
+        <td title={item.request_id}>{item.request_id.slice(0, 8)}</td>
+        <td title={item.correlation_id}>{item.correlation_id.slice(0, 12)}</td>
+        <td>{item.documents_count}</td><td>{item.model}<br /><small>{item.device}</small></td>
+        <td>{item.latency_ms}ms</td><td>{item.cache_hits}</td><td>{item.status}</td></tr>)}
+    </tbody></table></div><div className="actions"><button className="secondary" disabled={page === 1}
+      onClick={() => setPage(page - 1)}>Previous</button><span>Page {page}</span>
+      <button className="secondary" disabled={page * query.data.size >= query.data.total}
+        onClick={() => setPage(page + 1)}>Next</button></div></section>;
+}
+
+function SystemHealthPanel({ token }: { token: string }) {
+  const health = useQuery({ queryKey: ['system-health'],
+    queryFn: () => api<Record<string, string | boolean>>('admin/system/health', token),
+    refetchInterval: 5000 });
+  const resources = useQuery({ queryKey: ['system-resources'],
+    queryFn: () => api<Record<string, number | boolean | null>>('admin/system/resources', token),
+    refetchInterval: 5000 });
+  if (!health.data || !resources.data) return <div className="skeleton">Loading…</div>;
+  return <section><header><h2>System Health</h2><button className="secondary" onClick={() => {
+    health.refetch(); resources.refetch();
+  }}>Refresh</button></header><div className="cards">
+    {Object.entries(health.data).map(([name, value]) => <article key={name}><span>{name}</span>
+      <strong>{String(value)}</strong></article>)}
+  </div><h3>Resources</h3><dl className="details">{Object.entries(resources.data).map(([name, value]) =>
+    <div key={name}><dt>{name.replaceAll('_', ' ')}</dt><dd>{String(value ?? 'Unavailable')}</dd></div>)}</dl>
+  </section>;
+}
+
 function DataView({ section, token }: { section: Section; token: string }) {
   const endpoint = `admin/${paths[section]}`;
   const query = useQuery({ queryKey: [endpoint], queryFn: () => api(endpoint, token),
@@ -259,6 +324,9 @@ export function App() {
   else if (section === 'Runtime') content = <RuntimePanel token={token} />;
   else if (section === 'Cache') content = <CachePanel token={token} />;
   else if (section === 'Benchmarks') content = <BenchmarksPanel token={token} />;
+  else if (section === 'Models') content = <ModelsPanel token={token} />;
+  else if (section === 'Requests') content = <RequestsPanel token={token} />;
+  else if (section === 'System Health') content = <SystemHealthPanel token={token} />;
   else content = <DataView section={section} token={token} />;
   return <div className="shell"><aside><div className="brand">RR <span>Console</span></div>
     {sections.map((item) => <button className={item === section ? 'active' : ''}
