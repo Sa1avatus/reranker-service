@@ -9,5 +9,6 @@ __pycache__/
 htmlcov/
 web/node_modules/
 web/dist/
+web/*.tsbuildinfo
 .pnpm-store/
 test-results/

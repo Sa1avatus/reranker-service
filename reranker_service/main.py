@@ -12,6 +12,7 @@ from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
 from .admin import AdminState
+from .batching import DynamicBatcher
 from .cache import ScoreCache
 from .config import Settings, get_settings
 from .errors import ServiceError, service_error_handler
@@ -30,16 +31,20 @@ log = structlog.get_logger()
 def create_app(settings: Settings | None = None, *, load_model: bool = True) -> FastAPI:
     cfg = settings or get_settings()
     runtime, cache = ModelRuntime(cfg), ScoreCache(cfg)
-    service, security, admin = RerankService(cfg, runtime, cache), Security(cfg), AdminState(cfg)
+    batcher = DynamicBatcher(cfg, runtime)
+    service = RerankService(cfg, batcher, cache, readiness=runtime, device=runtime.device)
+    security, admin = Security(cfg), AdminState(cfg)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):  # type: ignore[no-untyped-def]
+        await batcher.start()
         app.state.model_task = asyncio.create_task(runtime.load()) if load_model else None
         if not load_model:
             runtime.model, runtime.ready = "injected", True
         yield
         if app.state.model_task and not app.state.model_task.done():
             app.state.model_task.cancel()
+        await batcher.close()
         await cache.close()
         runtime.close()
 
@@ -206,7 +211,7 @@ def create_app(settings: Settings | None = None, *, load_model: bool = True) -> 
 
     @app.get("/v1/admin/runtime", dependencies=admin_deps)
     async def get_runtime() -> dict[str, Any]:
-        return admin.runtime | admin.resources()
+        return admin.runtime | admin.resources() | {"queue_depth": batcher.depth}
 
     @app.patch("/v1/admin/runtime", dependencies=admin_deps)
     async def patch_runtime(body: RuntimePatch) -> dict[str, Any]:

@@ -9,9 +9,7 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     model: str = Field("BAAI/bge-reranker-v2-m3", alias="RERANKER_MODEL")
-    model_revision: str = Field(
-        "953dc6f", alias="RERANKER_MODEL_REVISION"
-    )
+    model_revision: str = Field("953dc6f", alias="RERANKER_MODEL_REVISION")
     model_allowlist: str = Field("BAAI/bge-reranker-v2-m3", alias="RERANKER_MODEL_ALLOWLIST")
     device: Literal["cpu", "cuda", "auto"] = Field("cpu", alias="RERANKER_DEVICE")
     batch_size: int = Field(16, ge=1, le=256, alias="RERANKER_BATCH_SIZE")

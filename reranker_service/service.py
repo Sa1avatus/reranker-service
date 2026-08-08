@@ -4,11 +4,11 @@ from dataclasses import dataclass
 
 from opentelemetry import trace
 
+from .batching import PairPredictor
 from .cache import ScoreCache
 from .config import Settings
 from .errors import ServiceError
 from .metrics import DOCUMENTS_RECEIVED, DOCUMENTS_SCORED, TIMEOUTS, TRUNCATIONS
-from .runtime import ModelRuntime
 from .schemas import Document, RerankRequest, RerankResponse, Result, Usage
 
 tracer = trace.get_tracer(__name__)
@@ -22,8 +22,20 @@ class PreparedDocument:
 
 
 class RerankService:
-    def __init__(self, settings: Settings, runtime: ModelRuntime, cache: ScoreCache) -> None:
-        self.settings, self.runtime, self.cache = settings, runtime, cache
+    def __init__(
+        self,
+        settings: Settings,
+        runtime: PairPredictor,
+        cache: ScoreCache,
+        *,
+        readiness: object,
+        device: str,
+    ) -> None:
+        self.settings = settings
+        self.runtime = runtime
+        self.cache = cache
+        self.readiness = readiness
+        self.device = device
 
     def _validate(self, request: RerankRequest) -> tuple[str, list[PreparedDocument]]:
         with tracer.start_as_current_span("reranker.validation"):
@@ -53,7 +65,7 @@ class RerankService:
             return query, prepared
 
     async def rerank(self, request: RerankRequest) -> RerankResponse:
-        if not self.runtime.ready:
+        if not bool(getattr(self.readiness, "ready", False)):
             raise ServiceError(503, "model_not_ready", "model is not ready")
         started = time.perf_counter()
         query, prepared = self._validate(request)
@@ -102,7 +114,7 @@ class RerankService:
             request_id=request.request_id,
             model=self.settings.model,
             model_revision=self.settings.model_revision,
-            device=self.runtime.device,
+            device=self.device,
             results=results,
             usage=Usage(
                 documents_received=len(prepared),

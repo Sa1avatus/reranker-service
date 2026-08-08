@@ -4,5 +4,4 @@
 
 Public scores are sigmoid-normalized logits and are not comparable across model versions. Cache keys contain only SHA-256 over the pinned model identity, normalized texts and max length. Request text is neither logged nor retained. Runtime modifications are audited; changes that affect loaded model memory are reported as restart-required.
 
-Dynamic batching configuration and the batch-pair ceiling are exposed, but this version implements batching within each request and concurrent `/v1/rerank/batch` fan-out. It does not claim cross-request micro-batching.
-
+The lifecycle-managed micro-batcher combines pairs from concurrent requests during the configured window, caps every inference call at `RERANKER_MAX_BATCH_PAIRS`, splits oversized jobs, and maps scores back through per-request futures. Cancellation or timeout of one request does not mix request IDs or result arrays.
