@@ -61,9 +61,22 @@ table { width: 100%; border-collapse: collapse; background: var(--panel); }
 th, td { padding: 11px 13px; border-bottom: 1px solid var(--line); text-align: left; white-space: nowrap; }
 th { color: #9fb3ad; font-size: 13px; }
 small { color: #9fb3ad; }
+.file-button { display: inline-flex; background: #1c302a; color: #dce7e4; border-radius: 7px;
+  padding: 11px 18px; font-weight: 700; cursor: pointer; }
+.file-button input { position: absolute; width: 1px; height: 1px; opacity: 0; }
+.document-list { display: grid; gap: 10px; }
+.document-list article { display: grid; grid-template-columns: 24px minmax(150px, .35fr) 1fr auto;
+  gap: 12px; align-items: center; background: var(--panel); border: 1px solid var(--line);
+  border-radius: 9px; padding: 12px; }
+.document-list label { margin: 0; }
+.drag { color: #9fb3ad; cursor: grab; font-size: 22px; }
+.document-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+.document-actions button { padding: 8px 10px; }
 @media (max-width: 750px) {
   .shell { grid-template-columns: 1fr; }
   aside { position: static; flex-direction: row; overflow: auto; }
   .brand { display: none; }
   main { padding: 22px; }
+  .document-list article { grid-template-columns: 20px 1fr; }
+  .document-list article label, .document-actions { grid-column: 2; }
 }

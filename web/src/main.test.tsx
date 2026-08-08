@@ -2,7 +2,26 @@ import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { describe, expect, it, vi } from 'vitest';
 
-import { App, Login } from './main';
+import { App, Login, parseDocuments } from './main';
+
+describe('document imports', () => {
+  it('preserves JSON document IDs and metadata', () => {
+    const documents = parseDocuments('documents.json', JSON.stringify([
+      { id: 'original-id', text: 'Kubernetes', metadata: { collection: 'profile' } },
+    ]));
+    expect(documents[0]).toEqual({
+      id: 'original-id', text: 'Kubernetes', metadata: { collection: 'profile' },
+    });
+  });
+
+  it('parses quoted CSV fields', () => {
+    const documents = parseDocuments('documents.csv',
+      'id,text,metadata\nrow-1,"Python, FastAPI","{""language"":""en""}"');
+    expect(documents[0].id).toBe('row-1');
+    expect(documents[0].text).toBe('Python, FastAPI');
+    expect(documents[0].metadata).toEqual({ language: 'en' });
+  });
+});
 
 describe('authentication', () => {
   it('submits the admin token without rendering it as plain text', () => {
@@ -122,6 +141,22 @@ describe('administrative controls', () => {
       expect.objectContaining({ method: 'POST', body: expect.stringContaining('Python') })));
     const call = fetchMock.mock.calls.find(([url]) => url === '/v1/admin/rerank/batch');
     expect(JSON.parse(call?.[1]?.body as string).requests).toHaveLength(2);
+    vi.unstubAllGlobals();
+  });
+
+  it('reorders documents while preserving their IDs', async () => {
+    sessionStorage.setItem('adminToken', 'admin-secret');
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ results: [] }) });
+    vi.stubGlobal('fetch', fetchMock);
+    render(<QueryClientProvider client={new QueryClient()}><App /></QueryClientProvider>);
+    fireEvent.click(screen.getByRole('button', { name: 'Rerank Playground' }));
+    fireEvent.click(screen.getAllByRole('button', { name: 'Move down' })[0]);
+    fireEvent.click(screen.getByRole('button', { name: 'Run rerank' }));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith('/v1/admin/rerank',
+      expect.objectContaining({ method: 'POST' })));
+    const call = fetchMock.mock.calls.find(([url]) => url === '/v1/admin/rerank');
+    const documents = JSON.parse(call?.[1]?.body as string).documents;
+    expect(documents.map((document: { id: string }) => document.id)).toEqual(['docker', 'kubernetes']);
     vi.unstubAllGlobals();
   });
 });

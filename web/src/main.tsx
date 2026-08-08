@@ -46,29 +46,112 @@ export function Login({ onLogin }: { onLogin: (token: string) => void }) {
   </label><button>Sign in</button></form></main>;
 }
 
-function Playground({ token, batch = false }: { token: string; batch?: boolean }) {
-  const [query, setQuery] = useState("Describe the candidate's Kubernetes experience");
-  const [documents, setDocuments] = useState(
-    'Basic conceptual knowledge of Kubernetes. No hands-on production experience.\n' +
-    'Production experience with Docker and Docker Compose.',
-  );
-  const mutation = useMutation({ mutationFn: async () => {
-    const request = {
-      query,
-      documents: documents.split('\n').filter(Boolean).map((text, index) => (
-        { id: `doc-${index + 1}`, text }
-      )),
-      top_n: 10, return_documents: true, truncate: true,
-    };
-    return api(batch ? 'admin/rerank/batch' : 'admin/rerank', token, {
-      method: 'POST', body: JSON.stringify(batch ? { requests: [request] } : request),
+type PlaygroundDocument = { id: string; text: string; metadata: Record<string, unknown> };
+
+function csvRows(content: string): string[][] {
+  const rows: string[][] = []; let row: string[] = []; let field = ''; let quoted = false;
+  for (let index = 0; index < content.length; index += 1) {
+    const character = content[index];
+    if (character === '"' && quoted && content[index + 1] === '"') { field += '"'; index += 1; }
+    else if (character === '"') quoted = !quoted;
+    else if (character === ',' && !quoted) { row.push(field); field = ''; }
+    else if ((character === '\n' || character === '\r') && !quoted) {
+      if (character === '\r' && content[index + 1] === '\n') index += 1;
+      row.push(field); if (row.some(Boolean)) rows.push(row); row = []; field = '';
+    } else field += character;
+  }
+  row.push(field); if (row.some(Boolean)) rows.push(row);
+  return rows;
+}
+
+export function parseDocuments(filename: string, content: string): PlaygroundDocument[] {
+  const extension = filename.toLowerCase().split('.').pop();
+  let documents: PlaygroundDocument[];
+  if (extension === 'json') {
+    const parsed: unknown = JSON.parse(content);
+    const values = Array.isArray(parsed) ? parsed : (parsed as { documents?: unknown }).documents;
+    if (!Array.isArray(values)) throw new Error('JSON must contain a document array');
+    documents = values.map((value, index) => {
+      if (typeof value === 'string') return { id: `doc-${index + 1}`, text: value, metadata: {} };
+      if (!value || typeof value !== 'object' || typeof (value as { text?: unknown }).text !== 'string') {
+        throw new Error(`Document ${index + 1} has no text`);
+      }
+      const object = value as { id?: unknown; text: string; metadata?: unknown };
+      return { id: typeof object.id === 'string' ? object.id : `doc-${index + 1}`, text: object.text,
+        metadata: object.metadata && typeof object.metadata === 'object' ?
+          object.metadata as Record<string, unknown> : {} };
     });
-  }});
-  return <section><h2>{batch ? 'Batch' : 'Rerank'} Playground</h2>
-    <label>Query<textarea value={query} onChange={(event) => setQuery(event.target.value)} /></label>
-    <label>Documents - one per line<textarea rows={8} value={documents}
-      onChange={(event) => setDocuments(event.target.value)} /></label>
-    <button onClick={() => mutation.mutate()} disabled={mutation.isPending}>Run rerank</button>
+  } else if (extension === 'csv') {
+    const rows = csvRows(content); const headers = rows.shift()?.map((header) => header.trim().toLowerCase());
+    const textIndex = headers?.indexOf('text') ?? -1;
+    if (textIndex < 0) throw new Error('CSV requires a text column');
+    const idIndex = headers?.indexOf('id') ?? -1; const metadataIndex = headers?.indexOf('metadata') ?? -1;
+    documents = rows.map((row, index) => {
+      let metadata: Record<string, unknown> = {};
+      if (metadataIndex >= 0 && row[metadataIndex]) {
+        try { metadata = JSON.parse(row[metadataIndex]) as Record<string, unknown>; }
+        catch { metadata = { imported_metadata: row[metadataIndex] }; }
+      }
+      return { id: idIndex >= 0 && row[idIndex] ? row[idIndex] : `doc-${index + 1}`,
+        text: row[textIndex] || '', metadata };
+    });
+  } else {
+    documents = content.split(/\r?\n/).filter(Boolean).map((text, index) =>
+      ({ id: `doc-${index + 1}`, text, metadata: {} }));
+  }
+  documents = documents.filter((document) => document.text.length > 0);
+  if (!documents.length) throw new Error('No documents found');
+  if (documents.length > 100) throw new Error('A request may contain at most 100 documents');
+  return documents;
+}
+
+function Playground({ token }: { token: string }) {
+  const [query, setQuery] = useState("Describe the candidate's Kubernetes experience");
+  const [documents, setDocuments] = useState<PlaygroundDocument[]>([
+    { id: 'kubernetes', text: 'Basic conceptual knowledge of Kubernetes.', metadata: {} },
+    { id: 'docker', text: 'Production experience with Docker Compose.', metadata: {} },
+  ]);
+  const [topN, setTopN] = useState(10); const [importError, setImportError] = useState('');
+  const [dragged, setDragged] = useState<number | null>(null);
+  const mutation = useMutation({ mutationFn: () => api<Record<string, unknown>>('admin/rerank', token, {
+    method: 'POST', body: JSON.stringify({ query, documents, top_n: topN,
+      return_documents: true, truncate: true }),
+  }) });
+  const move = (from: number, to: number) => {
+    if (to < 0 || to >= documents.length || from === to) return;
+    const reordered = [...documents]; const [document] = reordered.splice(from, 1);
+    reordered.splice(to, 0, document); setDocuments(reordered);
+  };
+  return <section><header><div><h2>Rerank Playground</h2><p>{documents.length}/100 documents</p></div>
+    <label className="file-button">Import JSON, CSV, or text<input aria-label="Import documents" type="file"
+      accept=".json,.csv,.txt,text/plain,application/json,text/csv" onChange={async (event) => {
+        const file = event.target.files?.[0]; if (!file) return;
+        try { setDocuments(parseDocuments(file.name, await file.text())); setImportError(''); }
+        catch (error) { setImportError(error instanceof Error ? error.message : 'Import failed'); }
+      }} /></label></header>
+    <label>Query<textarea maxLength={8000} value={query}
+      onChange={(event) => setQuery(event.target.value)} /></label>
+    {importError && <p className="error" role="alert">{importError}</p>}
+    <div className="document-list">{documents.map((document, index) => <article key={`${document.id}-${index}`}
+      draggable onDragStart={() => setDragged(index)} onDragOver={(event) => event.preventDefault()}
+      onDrop={() => { if (dragged !== null) move(dragged, index); setDragged(null); }}>
+      <span className="drag" title="Drag to reorder">⋮⋮</span>
+      <label>ID<input aria-label={`Document ID ${index + 1}`} value={document.id}
+        onChange={(event) => setDocuments(documents.map((item, itemIndex) =>
+          itemIndex === index ? { ...item, id: event.target.value } : item))} /></label>
+      <label>Text<textarea aria-label={`Document text ${index + 1}`} maxLength={20000} value={document.text}
+        onChange={(event) => setDocuments(documents.map((item, itemIndex) =>
+          itemIndex === index ? { ...item, text: event.target.value } : item))} /></label>
+      <div className="document-actions"><button className="secondary" disabled={index === 0}
+        onClick={() => move(index, index - 1)}>Move up</button><button className="secondary"
+        disabled={index === documents.length - 1} onClick={() => move(index, index + 1)}>Move down</button>
+        <button className="danger" disabled={documents.length === 1}
+          onClick={() => setDocuments(documents.filter((_, itemIndex) => itemIndex !== index))}>Remove</button></div>
+    </article>)}</div><div className="actions"><button onClick={() => setDocuments([...documents,
+      { id: `doc-${documents.length + 1}`, text: '', metadata: {} }])}>Add document</button>
+      <label>Top N<input aria-label="Top N" type="number" min="1" max="100" value={topN}
+        onChange={(event) => setTopN(Number(event.target.value))} /></label>
+      <button onClick={() => mutation.mutate()} disabled={mutation.isPending}>Run rerank</button></div>
     {mutation.error && <p className="error" role="alert">{mutation.error.message}</p>}
     {mutation.data !== undefined && <pre>{JSON.stringify(mutation.data, null, 2)}</pre>}
   </section>;

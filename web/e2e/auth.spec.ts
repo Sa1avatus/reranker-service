@@ -98,3 +98,23 @@ test('admin submits multiple requests through batch playground', async ({ page }
   expect(payload.requests).toHaveLength(2);
   await expect(page.getByRole('button', { name: 'Export JSON' })).toBeEnabled();
 });
+
+test('admin reorders documents without changing IDs', async ({ page }) => {
+  await page.route('**/v1/admin/dashboard', route => route.fulfill({ json: {
+    model: { ready: true }, redis: { available: true },
+    resources: { cpu_percent: 1, ram_percent: 2, uptime_seconds: 3 },
+  } }));
+  await page.route('**/v1/admin/metrics/timeseries**', route => route.fulfill({ json: { points: [] } }));
+  await page.route('**/v1/admin/rerank', route => route.fulfill({ json: { results: [] } }));
+  await page.goto('/');
+  await page.getByLabel('Admin token').fill('test-admin-token');
+  await page.getByRole('button', { name: 'Sign in' }).click();
+  await page.getByRole('button', { name: 'Rerank Playground' }).click();
+  await page.getByRole('button', { name: 'Move down' }).first().click();
+  const requestPromise = page.waitForRequest('**/v1/admin/rerank');
+  await page.getByRole('button', { name: 'Run rerank' }).click();
+  const payload = (await requestPromise).postDataJSON();
+  expect(payload.documents.map((document: { id: string }) => document.id)).toEqual([
+    'docker', 'kubernetes',
+  ]);
+});
