@@ -19,6 +19,7 @@ dev = ["pytest==8.4.1", "pytest-asyncio==1.1.0", "pytest-cov==6.2.1", "mypy==1.1
 testpaths = ["tests"]
 asyncio_mode = "auto"
 addopts = "--cov=reranker_service --cov-report=term-missing --cov-fail-under=85"
+markers = ["integration: requires an external service such as Redis"]
 
 [tool.ruff]
 line-length = 100
