@@ -1,0 +1,28 @@
+services:
+  reranker-redis:
+    image: redis:7.4.2-alpine3.21
+    command: ["redis-server","--appendonly","yes","--maxmemory","256mb","--maxmemory-policy","allkeys-lru"]
+    ports: ["57379:6379"]
+    volumes: ["redis-data:/data"]
+    healthcheck: {test: ["CMD","redis-cli","ping"], interval: 5s, timeout: 3s, retries: 10}
+    restart: unless-stopped
+    deploy: {resources: {limits: {memory: 384M, cpus: "1.0"}}}
+  reranker-api:
+    build: {context: ., target: cpu}
+    env_file:
+      - path: .env
+        required: false
+    environment: {RERANKER_REDIS_URL: "redis://reranker-redis:6379/0"}
+    ports: ["8200:8200"]
+    volumes: ["model-cache:/models"]
+    depends_on: {reranker-redis: {condition: service_healthy}}
+    healthcheck: {test: ["CMD","python","-c","import urllib.request; urllib.request.urlopen('http://localhost:8200/health/live')"], interval: 10s, timeout: 5s, retries: 20}
+    restart: unless-stopped
+    deploy: {resources: {limits: {memory: 6G, cpus: "4.0"}}}
+  reranker-web:
+    build: ./web
+    ports: ["8400:8400"]
+    depends_on: {reranker-api: {condition: service_healthy}}
+    restart: unless-stopped
+    deploy: {resources: {limits: {memory: 128M, cpus: "0.5"}}}
+volumes: {redis-data: {}, model-cache: {}}
