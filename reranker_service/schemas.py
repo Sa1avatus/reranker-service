@@ -1,4 +1,4 @@
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID, uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -85,3 +85,13 @@ class CachePatch(BaseModel):
         if not self.model_fields_set:
             raise ValueError("at least one cache setting is required")
         return self
+
+
+class BenchmarkSpec(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    mode: Literal["low_priority", "exclusive"] = "low_priority"
+    repetitions: int = Field(5, ge=1, le=100)
+    warmup_count: int = Field(1, ge=0, le=20)
+    document_count: int = Field(2, ge=1, le=100)
+    multilingual: bool = True
+    confirm: str | None = None

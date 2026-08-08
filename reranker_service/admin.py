@@ -1,5 +1,5 @@
 import time
-from collections import deque
+from collections import defaultdict, deque
 from typing import Any
 from uuid import uuid4
 
@@ -61,3 +61,28 @@ class AdminState:
             else None,
             "uptime_seconds": round(time.time() - self.started),
         }
+
+    def timeseries(self, period_seconds: int, bucket_seconds: int) -> list[dict[str, Any]]:
+        cutoff = time.time() - period_seconds
+        buckets: dict[int, list[dict[str, Any]]] = defaultdict(list)
+        for request in self.requests:
+            timestamp = float(request["timestamp"])
+            if timestamp >= cutoff:
+                bucket = int(timestamp // bucket_seconds) * bucket_seconds
+                buckets[bucket].append(request)
+        points = []
+        for timestamp, requests in sorted(buckets.items()):
+            latencies = sorted(float(item["latency_ms"]) for item in requests)
+            p95_index = min(round((len(latencies) - 1) * 0.95), len(latencies) - 1)
+            points.append(
+                {
+                    "timestamp": timestamp,
+                    "requests": len(requests),
+                    "documents": sum(int(item["documents_count"]) for item in requests),
+                    "cache_hits": sum(int(item["cache_hits"]) for item in requests),
+                    "latency_mean_ms": sum(latencies) / len(latencies),
+                    "latency_p95_ms": latencies[p95_index],
+                    "errors": sum(item["status"] != "success" for item in requests),
+                }
+            )
+        return points

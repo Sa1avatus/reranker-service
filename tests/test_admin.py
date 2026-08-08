@@ -1,3 +1,6 @@
+import time
+
+
 def test_admin_is_separately_protected(client, auth, admin_auth):
     assert client.get("/v1/admin/dashboard", headers=auth).status_code == 401
     assert client.get("/v1/admin/dashboard", headers=admin_auth).status_code == 200
@@ -54,8 +57,18 @@ def test_cache_patch_is_validated_and_applied(client, admin_auth):
 
 def test_benchmark_lifecycle(client, admin_auth):
     run = client.post(
-        "/v1/admin/benchmarks", json={"mode": "low_priority"}, headers=admin_auth
+        "/v1/admin/benchmarks",
+        json={"mode": "low_priority", "repetitions": 1, "warmup_count": 0},
+        headers=admin_auth,
     ).json()
+    for _ in range(100):
+        run = client.get(f"/v1/admin/benchmarks/{run['id']}", headers=admin_auth).json()
+        if run["status"] in {"completed", "failed"}:
+            break
+        time.sleep(0.01)
+    assert run["status"] == "completed"
+    assert run["results"]["requests"] == 2
+    assert run["results"]["pairs"] == 4
     assert client.post(f"/v1/admin/benchmarks/{run['id']}/baseline", headers=admin_auth).json()[
         "baseline"
     ]
@@ -95,3 +108,26 @@ def test_model_allowlist_and_exclusive_confirmation(client, admin_auth):
         ).status_code
         == 400
     )
+
+
+def test_benchmark_validation_and_cancellation(client, admin_auth):
+    assert (
+        client.post("/v1/admin/benchmarks", json={"repetitions": 0}, headers=admin_auth).status_code
+        == 422
+    )
+    run = client.post("/v1/admin/benchmarks", json={"repetitions": 50}, headers=admin_auth).json()
+    assert client.delete(f"/v1/admin/benchmarks/{run['id']}", headers=admin_auth).status_code == 200
+
+
+def test_metrics_timeseries_contains_only_technical_metadata(client, admin_auth, auth, payload):
+    assert client.post("/v1/rerank", json=payload, headers=auth).status_code == 200
+    response = client.get(
+        "/v1/admin/metrics/timeseries?period_seconds=3600&bucket_seconds=60",
+        headers=admin_auth,
+    )
+    assert response.status_code == 200
+    point = response.json()["points"][-1]
+    assert point["requests"] >= 1
+    assert point["documents"] >= 2
+    assert "query" not in point
+    assert "text" not in point

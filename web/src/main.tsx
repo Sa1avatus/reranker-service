@@ -155,6 +155,82 @@ function CachePanel({ token }: { token: string }) {
   </section>;
 }
 
+type BenchmarkRun = {
+  id: string; status: string; baseline: boolean; created_at: number;
+  parameters: Record<string, unknown>; results?: Record<string, number> | null;
+};
+
+function BenchmarksPanel({ token }: { token: string }) {
+  const client = useQueryClient();
+  const [repetitions, setRepetitions] = useState(5);
+  const runs = useQuery({
+    queryKey: ['benchmarks'], queryFn: () => api<{ items: BenchmarkRun[] }>('admin/benchmarks', token),
+    refetchInterval: 1000,
+  });
+  const start = useMutation({
+    mutationFn: () => api<BenchmarkRun>('admin/benchmarks', token, {
+      method: 'POST', body: JSON.stringify({ mode: 'low_priority', repetitions,
+        warmup_count: 1, document_count: 2, multilingual: true }),
+    }),
+    onSuccess: () => client.invalidateQueries({ queryKey: ['benchmarks'] }),
+  });
+  const baseline = useMutation({
+    mutationFn: (id: string) => api(`admin/benchmarks/${id}/baseline`, token, { method: 'POST' }),
+    onSuccess: () => client.invalidateQueries({ queryKey: ['benchmarks'] }),
+  });
+  const remove = useMutation({
+    mutationFn: (id: string) => api(`admin/benchmarks/${id}`, token, { method: 'DELETE' }),
+    onSuccess: () => client.invalidateQueries({ queryKey: ['benchmarks'] }),
+  });
+  return <section><header><div><h2>Benchmarks</h2><p>Runs use the built-in multilingual dataset.</p></div>
+    <div className="actions"><label>Repetitions<input aria-label="Benchmark repetitions" type="number"
+      min="1" max="100" value={repetitions}
+      onChange={(event) => setRepetitions(Number(event.target.value))} /></label>
+      <button onClick={() => start.mutate()} disabled={start.isPending}>Run benchmark</button></div></header>
+    {start.error && <p className="error" role="alert">{start.error.message}</p>}
+    <div className="run-list">{runs.data?.items.map((run) => <article key={run.id}>
+      <header><strong>{run.id.slice(0, 8)}</strong><span>{run.status}{run.baseline ? ' · baseline' : ''}</span></header>
+      {run.results && <div className="cards">
+        {['p50_ms', 'p95_ms', 'p99_ms', 'pairs_per_second'].map((metric) => <div key={metric}>
+          <span>{metric}</span><strong>{run.results?.[metric]?.toFixed(2)}</strong></div>)}
+      </div>}
+      <div className="actions"><button className="secondary" disabled={run.status !== 'completed'}
+        onClick={() => baseline.mutate(run.id)}>Set baseline</button>
+        <button className="danger" onClick={() => {
+          if (window.confirm('Delete this benchmark run?')) remove.mutate(run.id);
+        }}>Delete</button></div>
+    </article>)}</div>
+  </section>;
+}
+
+type DashboardState = {
+  model: { name: string; revision: string; ready: boolean; device: string };
+  redis: { available: boolean };
+  resources: { cpu_percent: number; ram_percent: number; uptime_seconds: number };
+};
+
+function DashboardPanel({ token }: { token: string }) {
+  const dashboard = useQuery({ queryKey: ['dashboard'],
+    queryFn: () => api<DashboardState>('admin/dashboard', token), refetchInterval: 10000 });
+  const metrics = useQuery({ queryKey: ['timeseries'],
+    queryFn: () => api<{ points: Array<Record<string, number>> }>(
+      'admin/metrics/timeseries?period_seconds=3600&bucket_seconds=60', token),
+    refetchInterval: 10000 });
+  if (!dashboard.data) return <div className="skeleton">Loading…</div>;
+  const data = dashboard.data;
+  return <section><h2>Dashboard</h2><div className="cards">
+    <article><span>Model</span><strong>{data.model.ready ? 'Ready' : 'Not ready'}</strong></article>
+    <article><span>Redis</span><strong>{data.redis.available ? 'Available' : 'Degraded'}</strong></article>
+    <article><span>CPU</span><strong>{data.resources.cpu_percent}%</strong></article>
+    <article><span>RAM</span><strong>{data.resources.ram_percent}%</strong></article>
+  </div><h3>Last hour</h3><div className="metric-table">
+    {metrics.data?.points.length ? metrics.data.points.map((point) => <div key={point.timestamp}>
+      <time>{new Date(point.timestamp * 1000).toLocaleTimeString()}</time>
+      <span>{point.requests} requests</span><span>{point.latency_p95_ms.toFixed(1)}ms p95</span>
+      <span>{point.cache_hits} cache hits</span></div>) : <p>No requests in this period.</p>}
+  </div></section>;
+}
+
 function DataView({ section, token }: { section: Section; token: string }) {
   const endpoint = `admin/${paths[section]}`;
   const query = useQuery({ queryKey: [endpoint], queryFn: () => api(endpoint, token),
@@ -177,10 +253,12 @@ export function App() {
     setToken(value);
   }} />;
   let content: React.ReactNode;
-  if (section === 'Rerank Playground') content = <Playground token={token} />;
+  if (section === 'Dashboard') content = <DashboardPanel token={token} />;
+  else if (section === 'Rerank Playground') content = <Playground token={token} />;
   else if (section === 'Batch Playground') content = <Playground token={token} batch />;
   else if (section === 'Runtime') content = <RuntimePanel token={token} />;
   else if (section === 'Cache') content = <CachePanel token={token} />;
+  else if (section === 'Benchmarks') content = <BenchmarksPanel token={token} />;
   else content = <DataView section={section} token={token} />;
   return <div className="shell"><aside><div className="brand">RR <span>Console</span></div>
     {sections.map((item) => <button className={item === section ? 'active' : ''}

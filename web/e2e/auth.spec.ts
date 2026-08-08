@@ -1,7 +1,11 @@
 import { expect, test } from '@playwright/test';
 
 test('admin can sign in and log out', async ({ page }) => {
-  await page.route('**/v1/admin/dashboard', route => route.fulfill({ json: { model: { ready: true } } }));
+  await page.route('**/v1/admin/dashboard', route => route.fulfill({ json: {
+    model: { ready: true, name: 'test', revision: 'abc', device: 'cpu' },
+    redis: { available: true }, resources: { cpu_percent: 1, ram_percent: 2, uptime_seconds: 3 },
+  } }));
+  await page.route('**/v1/admin/metrics/timeseries**', route => route.fulfill({ json: { points: [] } }));
   await page.goto('/');
   await page.getByLabel('Admin token').fill('test-admin-token');
   await page.getByRole('button', { name: 'Sign in' }).click();
@@ -11,7 +15,11 @@ test('admin can sign in and log out', async ({ page }) => {
 });
 
 test('admin validates runtime configuration', async ({ page }) => {
-  await page.route('**/v1/admin/dashboard', route => route.fulfill({ json: {} }));
+  await page.route('**/v1/admin/dashboard', route => route.fulfill({ json: {
+    model: { ready: true }, redis: { available: true },
+    resources: { cpu_percent: 1, ram_percent: 2, uptime_seconds: 3 },
+  } }));
+  await page.route('**/v1/admin/metrics/timeseries**', route => route.fulfill({ json: { points: [] } }));
   await page.route('**/v1/admin/runtime', route => route.fulfill({ json: {
     batch_size: 16, max_concurrency: 2, max_length: 1024, dynamic_batching: true,
     batch_window_ms: 10, max_batch_pairs: 128, request_timeout_seconds: 15,
@@ -26,4 +34,25 @@ test('admin validates runtime configuration', async ({ page }) => {
   await page.getByRole('button', { name: 'Runtime' }).click();
   await page.getByRole('button', { name: 'Validate configuration' }).click();
   await expect(page.getByText('Configuration is valid.')).toBeVisible();
+});
+
+test('admin starts a low-priority benchmark', async ({ page }) => {
+  await page.route('**/v1/admin/dashboard', route => route.fulfill({ json: {
+    model: { ready: true }, redis: { available: true },
+    resources: { cpu_percent: 1, ram_percent: 2, uptime_seconds: 3 },
+  } }));
+  await page.route('**/v1/admin/metrics/timeseries**', route => route.fulfill({ json: { points: [] } }));
+  await page.route('**/v1/admin/benchmarks', async route => {
+    if (route.request().method() === 'POST') await route.fulfill({ json: { id: 'run-1', status: 'queued' } });
+    else await route.fulfill({ json: { items: [] } });
+  });
+  await page.goto('/');
+  await page.getByLabel('Admin token').fill('test-admin-token');
+  await page.getByRole('button', { name: 'Sign in' }).click();
+  await page.getByRole('button', { name: 'Benchmarks' }).click();
+  const requestPromise = page.waitForRequest(request =>
+    request.url().endsWith('/v1/admin/benchmarks') && request.method() === 'POST');
+  await page.getByRole('button', { name: 'Run benchmark' }).click();
+  const request = await requestPromise;
+  expect(request.postDataJSON()).toMatchObject({ mode: 'low_priority', multilingual: true });
 });

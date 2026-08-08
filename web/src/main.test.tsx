@@ -66,4 +66,22 @@ describe('administrative controls', () => {
     confirm.mockRestore();
     vi.unstubAllGlobals();
   });
+
+  it('starts a low-priority multilingual benchmark', async () => {
+    sessionStorage.setItem('adminToken', 'admin-secret');
+    const fetchMock = vi.fn().mockImplementation(async (url: string, options?: RequestInit) => {
+      if (url.endsWith('/admin/benchmarks') && options?.method === 'POST') {
+        return { ok: true, json: async () => ({ id: 'run-1', status: 'queued' }) };
+      }
+      return { ok: true, json: async () => ({ items: [] }) };
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    render(<QueryClientProvider client={new QueryClient()}><App /></QueryClientProvider>);
+    fireEvent.click(screen.getByRole('button', { name: 'Benchmarks' }));
+    await screen.findByText('Runs use the built-in multilingual dataset.');
+    fireEvent.click(screen.getByRole('button', { name: 'Run benchmark' }));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith('/v1/admin/benchmarks',
+      expect.objectContaining({ method: 'POST', body: expect.stringContaining('low_priority') })));
+    vi.unstubAllGlobals();
+  });
 });

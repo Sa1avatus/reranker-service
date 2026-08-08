@@ -5,7 +5,7 @@ from typing import Any
 from uuid import uuid4
 
 import structlog
-from fastapi import Depends, FastAPI, Request
+from fastapi import Depends, FastAPI, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response
 from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
@@ -13,6 +13,7 @@ from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
 from .admin import AdminState
 from .batching import DynamicBatcher
+from .benchmark import BenchmarkRunner
 from .cache import ScoreCache
 from .config import Settings, get_settings
 from .errors import ServiceError, service_error_handler
@@ -21,6 +22,7 @@ from .runtime import ModelRuntime
 from .schemas import (
     BatchRequest,
     BatchResponse,
+    BenchmarkSpec,
     CachePatch,
     RerankRequest,
     RerankResponse,
@@ -41,6 +43,7 @@ def create_app(settings: Settings | None = None, *, load_model: bool = True) -> 
     batcher = DynamicBatcher(cfg, runtime)
     service = RerankService(cfg, batcher, cache, readiness=runtime, device=runtime.device)
     security, admin = Security(cfg), AdminState(cfg)
+    benchmark_runner = BenchmarkRunner(service, admin.benchmarks, admin.record)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):  # type: ignore[no-untyped-def]
@@ -51,6 +54,7 @@ def create_app(settings: Settings | None = None, *, load_model: bool = True) -> 
         yield
         if app.state.model_task and not app.state.model_task.done():
             app.state.model_task.cancel()
+        await benchmark_runner.close()
         await batcher.close()
         await cache.close()
         runtime.close()
@@ -221,8 +225,16 @@ def create_app(settings: Settings | None = None, *, load_model: bool = True) -> 
         return await rerank_batch(body)
 
     @app.get("/v1/admin/metrics/timeseries", dependencies=admin_deps)
-    async def timeseries() -> dict[str, Any]:
-        return {"points": [], "generated_at": time.time()}
+    async def timeseries(
+        period_seconds: int = Query(3600, ge=60, le=604800),
+        bucket_seconds: int = Query(60, ge=10, le=86400),
+    ) -> dict[str, Any]:
+        return {
+            "points": admin.timeseries(period_seconds, bucket_seconds),
+            "period_seconds": period_seconds,
+            "bucket_seconds": bucket_seconds,
+            "generated_at": time.time(),
+        }
 
     @app.get("/v1/admin/runtime", dependencies=admin_deps)
     async def get_runtime() -> dict[str, Any]:
@@ -309,20 +321,12 @@ def create_app(settings: Settings | None = None, *, load_model: bool = True) -> 
         return {"available": await cache.ping()}
 
     @app.post("/v1/admin/benchmarks", dependencies=admin_deps)
-    async def create_benchmark(body: dict[str, Any]) -> dict[str, Any]:
-        if body.get("mode") == "exclusive" and body.get("confirm") != "EXCLUSIVE":
+    async def create_benchmark(body: BenchmarkSpec) -> dict[str, Any]:
+        if body.mode == "exclusive" and body.confirm != "EXCLUSIVE":
             raise ServiceError(400, "invalid_request", "exclusive mode confirmation required")
-        bid = str(uuid4())
-        run = {
-            "id": bid,
-            "status": "queued",
-            "created_at": time.time(),
-            "parameters": body,
-            "baseline": False,
-        }
-        admin.benchmarks[bid] = run
-        admin.record("benchmark.created", {"id": bid})
-        return run
+        if not runtime.ready:
+            raise ServiceError(503, "model_not_ready", "model is not ready")
+        return benchmark_runner.start(body)
 
     @app.get("/v1/admin/benchmarks", dependencies=admin_deps)
     async def benchmarks() -> dict[str, Any]:
@@ -337,6 +341,8 @@ def create_app(settings: Settings | None = None, *, load_model: bool = True) -> 
     @app.post("/v1/admin/benchmarks/{benchmark_id}/baseline", dependencies=admin_deps)
     async def baseline(benchmark_id: str) -> dict[str, Any]:
         run = await benchmark(benchmark_id)
+        if run["status"] != "completed":
+            raise ServiceError(409, "benchmark_not_complete", "benchmark is not complete")
         for item in admin.benchmarks.values():
             item["baseline"] = False
         run["baseline"] = True
@@ -345,8 +351,8 @@ def create_app(settings: Settings | None = None, *, load_model: bool = True) -> 
 
     @app.delete("/v1/admin/benchmarks/{benchmark_id}", dependencies=admin_deps)
     async def delete_benchmark(benchmark_id: str) -> dict[str, bool]:
-        admin.benchmarks.pop(benchmark_id, None)
-        admin.record("benchmark.deleted", {"id": benchmark_id})
+        if not await benchmark_runner.delete(benchmark_id):
+            raise ServiceError(404, "not_found", "benchmark not found")
         return {"deleted": True}
 
     @app.get("/v1/admin/requests", dependencies=admin_deps)
