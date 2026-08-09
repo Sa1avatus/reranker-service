@@ -95,3 +95,14 @@ class BenchmarkSpec(BaseModel):
     document_count: int = Field(2, ge=1, le=100)
     multilingual: bool = True
     confirm: str | None = None
+
+
+class ModelCandidateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    name: str = Field(min_length=1, max_length=200)
+    revision: str = Field(pattern=r"^[0-9a-fA-F]{7,40}$")
+
+
+class ModelActivationRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    confirm: Literal["ACTIVATE"]

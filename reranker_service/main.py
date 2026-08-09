@@ -24,6 +24,8 @@ from .schemas import (
     BatchResponse,
     BenchmarkSpec,
     CachePatch,
+    ModelActivationRequest,
+    ModelCandidateRequest,
     RerankRequest,
     RerankResponse,
     RuntimePatch,
@@ -278,6 +280,12 @@ def create_app(settings: Settings | None = None, *, load_model: bool = True) -> 
 
     @app.post("/v1/admin/runtime/rollback", dependencies=admin_deps)
     async def rollback_runtime() -> dict[str, Any]:
+        if runtime.previous is not None:
+            state = await runtime.rollback()
+            admin.record(
+                "model.rolled_back", {"name": state["name"], "revision": state["revision"]}
+            )
+            return state
         admin.runtime, admin.previous = admin.previous, admin.runtime
         admin.record("runtime.rolled_back")
         return admin.runtime
@@ -291,6 +299,8 @@ def create_app(settings: Settings | None = None, *, load_model: bool = True) -> 
         ]
         return {
             "active_model": cfg.model,
+            "candidate": runtime.candidate_info,
+            "rollback_available": runtime.previous is not None,
             "models": [
                 {
                     "name": name,
@@ -308,22 +318,30 @@ def create_app(settings: Settings | None = None, *, load_model: bool = True) -> 
         }
 
     @app.post("/v1/admin/models/check", dependencies=admin_deps)
-    async def check_model(body: dict[str, Any]) -> dict[str, Any]:
-        name = str(body.get("name", ""))
-        return {"allowed": name in cfg.allowed_models, "name": name}
+    async def check_model(body: ModelCandidateRequest) -> dict[str, Any]:
+        return runtime.check_candidate(body.name, body.revision)
 
     @app.post("/v1/admin/models/load", dependencies=admin_deps)
-    async def load_candidate(body: dict[str, Any]) -> dict[str, Any]:
-        name = str(body.get("name", ""))
-        if name not in cfg.allowed_models:
-            raise ServiceError(400, "invalid_request", "model not allowlisted")
-        admin.record("model.load_requested", {"name": name})
-        return {"accepted": True, "restart_required": True}
+    async def load_candidate(body: ModelCandidateRequest) -> dict[str, Any]:
+        try:
+            result = await runtime.load_candidate(body.name, body.revision)
+        except ValueError as exc:
+            raise ServiceError(400, "invalid_request", str(exc)) from exc
+        admin.record(
+            "model.candidate_loaded",
+            {"name": body.name, "revision": body.revision,
+             "controlled_restart_required": result["controlled_restart_required"]},
+        )
+        return result
 
     @app.post("/v1/admin/models/activate", dependencies=admin_deps)
-    async def activate_model(body: dict[str, Any]) -> dict[str, Any]:
-        admin.record("model.activate_requested", {"name": body.get("name")})
-        return {"accepted": True}
+    async def activate_model(_: ModelActivationRequest) -> dict[str, Any]:
+        try:
+            state = await runtime.activate_candidate()
+        except ValueError as exc:
+            raise ServiceError(409, "candidate_not_ready", str(exc)) from exc
+        admin.record("model.activated", {"name": state["name"], "revision": state["revision"]})
+        return state
 
     @app.get("/v1/admin/cache", dependencies=admin_deps)
     async def cache_status() -> dict[str, Any]:

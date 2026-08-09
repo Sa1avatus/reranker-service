@@ -104,6 +104,32 @@ describe('administrative controls', () => {
     vi.unstubAllGlobals();
   });
 
+  it('checks, loads, and activates an immutable model candidate', async () => {
+    sessionStorage.setItem('adminToken', 'admin-secret');
+    const fetchMock = vi.fn().mockImplementation(async (url: string, options?: RequestInit) => {
+      if (url.endsWith('/admin/models') && !options?.method) return { ok: true, json: async () => ({
+        active_model: 'BAAI/bge-reranker-v2-m3', candidate: null, rollback_available: false,
+        models: [{ name: 'BAAI/bge-reranker-v2-m3', revision: '953dc6f', status: 'ready',
+          loaded: true, device_support: ['cpu'], max_length: 1024,
+          estimated_memory_bytes: 2500000000, average_latency_ms: null }],
+      }) };
+      return { ok: true, json: async () => ({ valid: true, status: 'ready' }) };
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    render(<QueryClientProvider client={new QueryClient()}><App /></QueryClientProvider>);
+    fireEvent.click(screen.getByRole('button', { name: 'Models' }));
+    await screen.findByDisplayValue('BAAI/bge-reranker-v2-m3');
+    fireEvent.change(screen.getByLabelText('Immutable revision'), { target: { value: 'abcdef1' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Check' }));
+    await screen.findByText('Candidate is valid.');
+    fireEvent.click(screen.getByRole('button', { name: 'Load candidate' }));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith('/v1/admin/models/load',
+      expect.objectContaining({ method: 'POST', body: expect.stringContaining('abcdef1') })));
+    expect((screen.getByRole('button', { name: 'Activate candidate' }) as HTMLButtonElement).disabled)
+      .toBe(true);
+    vi.unstubAllGlobals();
+  });
+
   it('renders request metadata without private payload text', async () => {
     sessionStorage.setItem('adminToken', 'admin-secret');
     const fetchMock = vi.fn().mockImplementation(async (url: string) => {

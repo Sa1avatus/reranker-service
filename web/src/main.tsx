@@ -374,10 +374,47 @@ type ModelInfo = {
 };
 
 function ModelsPanel({ token }: { token: string }) {
+  const queryClient = useQueryClient();
+  const [name, setName] = useState('');
+  const [revision, setRevision] = useState('');
   const query = useQuery({ queryKey: ['models'],
-    queryFn: () => api<{ active_model: string; models: ModelInfo[] }>('admin/models', token) });
+    queryFn: () => api<{ active_model: string; candidate: Record<string, unknown> | null;
+      rollback_available: boolean; models: ModelInfo[] }>('admin/models', token) });
+  const refresh = () => queryClient.invalidateQueries({ queryKey: ['models'] });
+  const check = useMutation({ mutationFn: () => api<Record<string, unknown>>('admin/models/check', token, {
+    method: 'POST', body: JSON.stringify({ name: name || query.data?.active_model, revision }),
+  }) });
+  const load = useMutation({ mutationFn: () => api<Record<string, unknown>>('admin/models/load', token, {
+    method: 'POST', body: JSON.stringify({ name: name || query.data?.active_model, revision }),
+  }), onSuccess: refresh });
+  const activate = useMutation({ mutationFn: () => api<Record<string, unknown>>(
+    'admin/models/activate', token,
+    { method: 'POST', body: JSON.stringify({ confirm: 'ACTIVATE' }) }), onSuccess: refresh });
+  const rollback = useMutation({ mutationFn: () => api<Record<string, unknown>>(
+    'admin/runtime/rollback', token, { method: 'POST' }), onSuccess: refresh });
   if (!query.data) return <div className="skeleton">Loading…</div>;
-  return <section><h2>Models</h2><div className="run-list">{query.data.models.map((model) =>
+  return <section><h2>Models</h2><div className="form-grid">
+    <label>Candidate model<input aria-label="Candidate model" value={name || query.data.active_model}
+      onChange={(event) => setName(event.target.value)} /></label>
+    <label>Immutable revision<input aria-label="Immutable revision" value={revision}
+      onChange={(event) => setRevision(event.target.value)} placeholder="7–40 hex characters" /></label>
+  </div><div className="actions">
+    <button className="secondary" disabled={!revision || check.isPending}
+      onClick={() => check.mutate()}>Check</button>
+    <button className="secondary" disabled={!revision || load.isPending}
+      onClick={() => load.mutate()}>Load candidate</button>
+    <button disabled={!query.data.candidate || activate.isPending} onClick={() => {
+      if (window.confirm('Activate the warmed candidate model?')) activate.mutate();
+    }}>Activate candidate</button>
+    <button className="danger" disabled={!query.data.rollback_available || rollback.isPending}
+      onClick={() => rollback.mutate()}>Rollback model</button>
+  </div>
+  {check.data && <p>{check.data.valid ? 'Candidate is valid.' : 'Candidate cannot be loaded.'}</p>}
+  {load.data?.controlled_restart_required === true &&
+    <p>Insufficient memory: controlled restart required.</p>}
+  {(check.error || load.error || activate.error || rollback.error) &&
+    <p className="error">{String(check.error || load.error || activate.error || rollback.error)}</p>}
+  <div className="run-list">{query.data.models.map((model) =>
     <article key={model.name}><header><strong>{model.name}</strong>
       <span>{model.loaded ? 'Active · ready' : model.status}</span></header>
       <dl className="details"><div><dt>Revision</dt><dd>{model.revision || 'Not loaded'}</dd></div>

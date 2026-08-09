@@ -80,7 +80,11 @@ def test_admin_operational_endpoints(client, admin_auth):
         assert client.get(f"/v1/admin/{endpoint}", headers=admin_auth).status_code == 200
     assert client.post("/v1/admin/cache/test", headers=admin_auth).status_code == 200
     assert (
-        client.post("/v1/admin/models/check", json={"name": "unknown"}, headers=admin_auth).json()[
+        client.post(
+            "/v1/admin/models/check",
+            json={"name": "unknown", "revision": "abcdef1"},
+            headers=admin_auth,
+        ).json()[
             "allowed"
         ]
         is False
@@ -120,10 +124,62 @@ def test_request_filters_and_batch_accounting(client, admin_auth, auth, payload)
 def test_model_allowlist_and_exclusive_confirmation(client, admin_auth):
     assert (
         client.post(
-            "/v1/admin/models/load", json={"name": "unknown"}, headers=admin_auth
+            "/v1/admin/models/load",
+            json={"name": "unknown", "revision": "abcdef1"},
+            headers=admin_auth,
         ).status_code
         == 400
     )
+
+
+def test_model_candidate_activation_and_rollback(client, admin_auth, auth, payload):
+    model_name = client.app.state.settings.model
+    original_revision = client.app.state.settings.model_revision
+    candidate_revision = "abcdef1"
+
+    checked = client.post(
+        "/v1/admin/models/check",
+        json={"name": model_name, "revision": candidate_revision},
+        headers=admin_auth,
+    )
+    assert checked.status_code == 200
+    assert checked.json()["valid"] is True
+    assert checked.json()["can_parallel_load"] is True
+
+    assert client.post(
+        "/v1/admin/models/activate", json={"confirm": "ACTIVATE"}, headers=admin_auth
+    ).status_code == 409
+    loaded = client.post(
+        "/v1/admin/models/load",
+        json={"name": model_name, "revision": candidate_revision},
+        headers=admin_auth,
+    )
+    assert loaded.status_code == 200
+    assert loaded.json()["status"] == "ready"
+    assert loaded.json()["warmup_complete"] is True
+
+    activated = client.post(
+        "/v1/admin/models/activate", json={"confirm": "ACTIVATE"}, headers=admin_auth
+    )
+    assert activated.status_code == 200
+    assert activated.json()["revision"] == candidate_revision
+    assert activated.json()["rollback_available"] is True
+    reranked = client.post("/v1/rerank", json=payload, headers=auth)
+    assert reranked.json()["model_revision"] == candidate_revision
+
+    rolled_back = client.post("/v1/admin/runtime/rollback", headers=admin_auth)
+    assert rolled_back.status_code == 200
+    assert rolled_back.json()["revision"] == original_revision
+
+
+def test_model_candidate_revision_is_immutable_sha(client, admin_auth):
+    model_name = client.app.state.settings.model
+    response = client.post(
+        "/v1/admin/models/check",
+        json={"name": model_name, "revision": "main"},
+        headers=admin_auth,
+    )
+    assert response.status_code == 422
     assert (
         client.post(
             "/v1/admin/benchmarks", json={"mode": "exclusive"}, headers=admin_auth
