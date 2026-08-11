@@ -3,6 +3,7 @@ import asyncio
 import pytest
 
 from reranker_service.batching import DynamicBatcher
+from reranker_service.errors import ServiceError
 
 
 class RecordingPredictor:
@@ -78,3 +79,41 @@ async def test_disabled_batcher_calls_predictor_directly(settings):
     batcher = DynamicBatcher(settings, predictor)
     assert await batcher.predict([("q", "3")]) == [3.0]
     assert predictor.calls == [[("q", "3")]]
+
+
+@pytest.mark.asyncio
+async def test_micro_batch_respects_approximate_token_limit(settings):
+    settings.dynamic_batching = True
+    settings.batch_window_ms = 1
+    settings.max_batch_pairs = 10
+    settings.max_batch_tokens = 4
+    predictor = RecordingPredictor()
+    batcher = DynamicBatcher(settings, predictor)
+    await batcher.start()
+    try:
+        result = await batcher.predict([("one two", "3"), ("one two", "4")])
+    finally:
+        await batcher.close()
+
+    assert result == [3.0, 4.0]
+    assert [len(call) for call in predictor.calls] == [1, 1]
+
+
+@pytest.mark.asyncio
+async def test_full_queue_returns_controlled_overload(settings):
+    settings.dynamic_batching = True
+    settings.max_queue_size = 1
+    predictor = RecordingPredictor()
+    batcher = DynamicBatcher(settings, predictor)
+    batcher._worker = asyncio.create_task(asyncio.sleep(3600))
+    first = asyncio.create_task(batcher.predict([("q", "1")]))
+    await asyncio.sleep(0)
+    try:
+        with pytest.raises(ServiceError) as error:
+            await batcher.predict([("q", "2")])
+        assert error.value.status == 429
+        assert error.value.code == "reranker_overloaded"
+    finally:
+        await batcher.close()
+        with pytest.raises(asyncio.CancelledError):
+            await first

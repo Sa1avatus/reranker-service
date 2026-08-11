@@ -1,7 +1,8 @@
 [CmdletBinding()]
 param(
     [int]$ReadyTimeoutMinutes = 30,
-    [switch]$SkipBuild
+    [switch]$SkipBuild,
+    [switch]$Cpu
 )
 
 $ErrorActionPreference = 'Stop'
@@ -51,7 +52,34 @@ else {
     Write-Host 'Keeping the existing .env file unchanged.'
 }
 
-$composeArguments = @('compose', 'up', '-d')
+$composeFiles = @()
+if ($Cpu) {
+    $composeFiles = @('-f', 'docker-compose.cpu.yml')
+}
+
+$composePrefix = @('compose') + $composeFiles
+if (-not $SkipBuild) {
+    $exporterBuildArguments = $composePrefix + @('--profile', 'exporter', 'build', 'reranker-exporter')
+    & docker @exporterBuildArguments
+    if ($LASTEXITCODE -ne 0) {
+        throw 'Docker Compose failed to build the model exporter.'
+    }
+}
+
+Write-Host 'Preparing or validating the pinned local ONNX artifact...'
+$exportArguments = $composePrefix + @(
+    '--profile', 'exporter', 'run', '--rm', 'reranker-exporter',
+    '--model-id', 'BAAI/bge-reranker-v2-m3',
+    '--revision', '953dc6f6f85a1b2dbfca4c34a2796e7dde08d41e',
+    '--precision', 'fp32',
+    '--score-transform', 'sigmoid'
+)
+& docker @exportArguments
+if ($LASTEXITCODE -ne 0) {
+    throw 'The pinned ONNX artifact could not be prepared or validated.'
+}
+
+$composeArguments = $composePrefix + @('up', '-d')
 if (-not $SkipBuild) {
     $composeArguments += '--build'
 }
@@ -62,7 +90,7 @@ if ($LASTEXITCODE -ne 0) {
 
 $readyUri = 'http://localhost:8200/health/ready'
 $deadline = (Get-Date).AddMinutes($ReadyTimeoutMinutes)
-Write-Host 'Waiting for the pinned model to download, warm up, and become ready...'
+Write-Host 'Waiting for the local ONNX artifact to load, warm up, and become ready...'
 do {
     try {
         $response = Invoke-RestMethod -Uri $readyUri -TimeoutSec 10
@@ -78,6 +106,8 @@ do {
     Start-Sleep -Seconds 5
 } while ((Get-Date) -lt $deadline)
 
-docker compose ps
-docker compose logs --tail 50 reranker-api
+$statusArguments = $composePrefix + @('ps')
+$logArguments = $composePrefix + @('logs', '--tail', '50', 'reranker-api')
+& docker @statusArguments
+& docker @logArguments
 throw "Readiness did not succeed within $ReadyTimeoutMinutes minutes."

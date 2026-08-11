@@ -19,3 +19,21 @@ TRUNCATIONS = Counter("reranker_truncations_total", "Inputs truncated")
 RATE_LIMITED = Counter("reranker_rate_limited_total", "Rate limited requests")
 TIMEOUTS = Counter("reranker_timeouts_total", "Inference timeouts")
 ERRORS = Counter("reranker_errors_total", "Service errors", ["status"])
+PROVIDER_ACTIVE = Gauge(
+    "reranker_provider_active", "Active inference execution provider", ["backend", "provider"]
+)
+PROVIDER_FALLBACKS = Counter(
+    "reranker_provider_fallbacks_total",
+    "Controlled execution provider fallbacks",
+    ["backend", "provider", "reason"],
+)
+CUDA_AVAILABLE = Gauge("reranker_cuda_available", "Whether CUDA provider is available")
+CUDA_INITIALIZATION_FAILURES = Counter(
+    "reranker_cuda_initialization_failures_total", "CUDA session initialization failures"
+)
+CUDA_INFERENCE_FAILURES = Counter(
+    "reranker_cuda_inference_failures_total", "CUDA inference failures"
+)
+CUDA_OOM = Counter("reranker_cuda_oom_total", "CUDA out-of-memory failures")
+GPU_MEMORY_USED = Gauge("reranker_gpu_memory_used_bytes", "GPU memory currently used")
+GPU_MEMORY_FREE = Gauge("reranker_gpu_memory_free_bytes", "GPU memory currently free")

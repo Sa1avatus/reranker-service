@@ -1,0 +1,13 @@
+services:
+  reranker-api:
+    build: {context: ., target: runtime-alibaba}
+    environment:
+      RERANKER_BACKEND: alibaba_gte
+      RERANKER_MODEL: Alibaba-NLP/gte-multilingual-reranker-base
+      RERANKER_MODEL_REVISION: 8215cf04918ba6f7b6a62bb44238ce2953d8831c
+      RERANKER_MODEL_ALLOWLIST: Alibaba-NLP/gte-multilingual-reranker-base
+      RERANKER_DEVICE: auto
+      RERANKER_TRUST_REMOTE_CODE: "true"
+      RERANKER_REMOTE_CODE_ALLOWLIST: Alibaba-NLP/gte-multilingual-reranker-base
+      RERANKER_REMOTE_CODE_REVISION: 40ced75c3017eb27626c9d4ea981bde21a2662f4
+      HF_HOME: /models/hf-cache

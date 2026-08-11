@@ -1,7 +1,9 @@
 from typing import Any, Literal
 from uuid import UUID, uuid4
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+from .revisions import validate_revision_reference
 
 
 class Document(BaseModel):
@@ -23,7 +25,8 @@ class RerankRequest(BaseModel):
 
 class Result(BaseModel):
     id: str
-    score: float = Field(ge=0, le=1)
+    score: float
+    normalized_score: float | None = Field(default=None, ge=0, le=1)
     rank: int = Field(ge=1)
     text: str | None = None
     metadata: dict[str, Any] | None = None
@@ -44,6 +47,11 @@ class RerankResponse(BaseModel):
     model: str
     model_revision: str
     device: str
+    requested_revision: str
+    resolved_revision: str
+    backend: str
+    rerank_mode: Literal["pairwise", "listwise"]
+    active_provider: str
     results: list[Result]
     usage: Usage
 
@@ -59,6 +67,7 @@ class BatchResponse(BaseModel):
 
 
 class RuntimePatch(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     batch_size: int | None = Field(None, ge=1, le=256)
     max_concurrency: int | None = Field(None, ge=1, le=32)
     max_length: int | None = Field(None, ge=64, le=8192)
@@ -100,7 +109,12 @@ class BenchmarkSpec(BaseModel):
 class ModelCandidateRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     name: str = Field(min_length=1, max_length=200)
-    revision: str = Field(pattern=r"^[0-9a-fA-F]{7,40}$")
+    revision: str = Field("main", min_length=1, max_length=200)
+
+    @field_validator("revision")
+    @classmethod
+    def safe_revision(cls, value: str) -> str:
+        return validate_revision_reference(value)
 
 
 class ModelActivationRequest(BaseModel):

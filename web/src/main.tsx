@@ -30,9 +30,47 @@ export async function api<T>(url: string, token: string, options: RequestInit = 
       ...options.headers,
     },
   });
-  const payload = await response.json();
-  if (!response.ok) throw new Error(payload.error?.message || response.statusText);
-  return payload as T;
+
+  let payload: unknown = null;
+
+  if (typeof response.text === 'function') {
+    // Nginx/proxy errors may return HTML instead of JSON. Reading text first lets
+    // the UI terminate the request cleanly instead of throwing "Unexpected token <".
+    const raw = await response.text();
+    if (raw) {
+      try {
+        payload = JSON.parse(raw);
+      } catch {
+        const compact = raw.replace(/\s+/g, ' ').trim().slice(0, 300);
+        if (!response.ok) {
+          throw new Error(
+            `HTTP ${response.status} ${response.statusText}${compact ? `: ${compact}` : ''}`,
+          );
+        }
+        throw new Error(`Invalid JSON response from /v1/${url}`);
+      }
+    }
+  } else {
+    // Keep compatibility with lightweight fetch implementations used by
+    // embedders and tests, which may expose json() but not text().
+    payload = await response.json();
+  }
+
+  if (!response.ok) {
+    const errorPayload = payload as {
+      error?: { message?: string };
+      detail?: string;
+      message?: string;
+    } | null;
+    throw new Error(
+      errorPayload?.error?.message
+      || errorPayload?.detail
+      || errorPayload?.message
+      || `HTTP ${response.status} ${response.statusText}`,
+    );
+  }
+
+  return (payload ?? {}) as T;
 }
 
 export function Login({ onLogin }: { onLogin: (token: string) => void }) {
@@ -47,6 +85,83 @@ export function Login({ onLogin }: { onLogin: (token: string) => void }) {
 }
 
 type PlaygroundDocument = { id: string; text: string; metadata: Record<string, unknown> };
+
+export const PLAYGROUND_STORAGE_KEY = 'reranker.playground.v1';
+const PLAYGROUND_STORAGE_VERSION = 1;
+const PLAYGROUND_SAVE_DELAY_MS = 250;
+
+type PlaygroundState = {
+  version: 1;
+  query: string;
+  documents: PlaygroundDocument[];
+  top_n: number;
+};
+
+const defaultPlaygroundState = (): PlaygroundState => ({
+  version: PLAYGROUND_STORAGE_VERSION,
+  query: "Describe the candidate's Kubernetes experience",
+  documents: [
+    { id: 'kubernetes', text: 'Basic conceptual knowledge of Kubernetes.', metadata: {} },
+    { id: 'docker', text: 'Production experience with Docker Compose.', metadata: {} },
+  ],
+  top_n: 10,
+});
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+export function loadPlaygroundState(): PlaygroundState {
+  try {
+    const raw = localStorage.getItem(PLAYGROUND_STORAGE_KEY);
+    if (!raw) return defaultPlaygroundState();
+    const value: unknown = JSON.parse(raw);
+    if (!isRecord(value) || value.version !== PLAYGROUND_STORAGE_VERSION ||
+        typeof value.query !== 'string' || !Array.isArray(value.documents) ||
+        typeof value.top_n !== 'number' || !Number.isInteger(value.top_n) ||
+        value.top_n < 1 || value.top_n > 100) {
+      return defaultPlaygroundState();
+    }
+    const documents = value.documents.map((document): PlaygroundDocument | null => {
+      if (!isRecord(document) || typeof document.id !== 'string' ||
+          typeof document.text !== 'string' || !isRecord(document.metadata)) return null;
+      return { id: document.id, text: document.text, metadata: document.metadata };
+    });
+    if (documents.some((document) => document === null) || documents.length > 100) {
+      return defaultPlaygroundState();
+    }
+    return {
+      version: PLAYGROUND_STORAGE_VERSION,
+      query: value.query,
+      documents: documents as PlaygroundDocument[],
+      top_n: Number(value.top_n),
+    };
+  } catch {
+    return defaultPlaygroundState();
+  }
+}
+
+export function savePlaygroundState(state: Omit<PlaygroundState, 'version'>): void {
+  try {
+    if (!state.query && state.documents.length === 0 && state.top_n === 10) {
+      localStorage.removeItem(PLAYGROUND_STORAGE_KEY);
+      return;
+    }
+    const persisted: PlaygroundState = {
+      version: PLAYGROUND_STORAGE_VERSION,
+      query: state.query,
+      documents: state.documents.map((document) => ({
+        id: document.id,
+        text: document.text,
+        metadata: document.metadata,
+      })),
+      top_n: state.top_n,
+    };
+    localStorage.setItem(PLAYGROUND_STORAGE_KEY, JSON.stringify(persisted));
+  } catch {
+    // Storage can be unavailable or full; the Playground must remain usable.
+  }
+}
 
 function csvRows(content: string): string[][] {
   const rows: string[][] = []; let row: string[] = []; let field = ''; let quoted = false;
@@ -106,17 +221,21 @@ export function parseDocuments(filename: string, content: string): PlaygroundDoc
 }
 
 function Playground({ token }: { token: string }) {
-  const [query, setQuery] = useState("Describe the candidate's Kubernetes experience");
-  const [documents, setDocuments] = useState<PlaygroundDocument[]>([
-    { id: 'kubernetes', text: 'Basic conceptual knowledge of Kubernetes.', metadata: {} },
-    { id: 'docker', text: 'Production experience with Docker Compose.', metadata: {} },
-  ]);
-  const [topN, setTopN] = useState(10); const [importError, setImportError] = useState('');
+  const [initialState] = useState(loadPlaygroundState);
+  const [query, setQuery] = useState(initialState.query);
+  const [documents, setDocuments] = useState<PlaygroundDocument[]>(initialState.documents);
+  const [topN, setTopN] = useState(initialState.top_n); const [importError, setImportError] = useState('');
   const [dragged, setDragged] = useState<number | null>(null);
   const mutation = useMutation({ mutationFn: () => api<Record<string, unknown>>('admin/rerank', token, {
     method: 'POST', body: JSON.stringify({ query, documents, top_n: topN,
       return_documents: true, truncate: true }),
   }) });
+  useEffect(() => {
+    const timeout = window.setTimeout(() => {
+      savePlaygroundState({ query, documents, top_n: topN });
+    }, PLAYGROUND_SAVE_DELAY_MS);
+    return () => window.clearTimeout(timeout);
+  }, [query, documents, topN]);
   const move = (from: number, to: number) => {
     if (to < 0 || to >= documents.length || from === to) return;
     const reordered = [...documents]; const [document] = reordered.splice(from, 1);
@@ -151,7 +270,11 @@ function Playground({ token }: { token: string }) {
       { id: `doc-${documents.length + 1}`, text: '', metadata: {} }])}>Add document</button>
       <label>Top N<input aria-label="Top N" type="number" min="1" max="100" value={topN}
         onChange={(event) => setTopN(Number(event.target.value))} /></label>
-      <button onClick={() => mutation.mutate()} disabled={mutation.isPending}>Run rerank</button></div>
+      <button onClick={() => mutation.mutate()} disabled={mutation.isPending}>Run rerank</button>
+      <button className="danger" onClick={() => {
+        mutation.reset(); setQuery(''); setDocuments([]); setTopN(10); setImportError(''); setDragged(null);
+        try { localStorage.removeItem(PLAYGROUND_STORAGE_KEY); } catch { /* Keep the UI clear. */ }
+      }}>Clear Playground</button></div>
     {mutation.error && <p className="error" role="alert">{mutation.error.message}</p>}
     {mutation.data !== undefined && <pre>{JSON.stringify(mutation.data, null, 2)}</pre>}
   </section>;
@@ -340,7 +463,9 @@ function BenchmarksPanel({ token }: { token: string }) {
 }
 
 type DashboardState = {
-  model: { name: string; revision: string; ready: boolean; device: string };
+  model: { name: string; revision: string; ready: boolean; device: string;
+    backend: { backend: string; active_provider?: string; fallback_reason?: string | null;
+      gpu_name?: string | null; available_providers?: string[] } };
   redis: { available: boolean };
   resources: { cpu_percent: number; ram_percent: number; uptime_seconds: number };
 };
@@ -356,6 +481,10 @@ function DashboardPanel({ token }: { token: string }) {
   const data = dashboard.data;
   return <section><h2>Dashboard</h2><div className="cards">
     <article><span>Model</span><strong>{data.model.ready ? 'Ready' : 'Not ready'}</strong></article>
+    <article><span>Backend</span><strong>{data.model.backend.backend}</strong></article>
+    <article><span>Provider</span><strong>{data.model.backend.active_provider || data.model.device}</strong>
+      {data.model.backend.fallback_reason && <small>{data.model.backend.fallback_reason}</small>}</article>
+    <article><span>GPU</span><strong>{data.model.backend.gpu_name || 'Not active'}</strong></article>
     <article><span>Redis</span><strong>{data.redis.available ? 'Available' : 'Degraded'}</strong></article>
     <article><span>CPU</span><strong>{data.resources.cpu_percent}%</strong></article>
     <article><span>RAM</span><strong>{data.resources.ram_percent}%</strong></article>
@@ -373,56 +502,245 @@ type ModelInfo = {
   average_latency_ms: number | null;
 };
 
+type ModelsResponse = {
+  active_model: string;
+  candidate: Record<string, unknown> | null;
+  rollback_available: boolean;
+  models: ModelInfo[];
+};
+
+type ModelCandidateResult = {
+  name?: string;
+  revision?: string | null;
+  requested_revision?: string;
+  valid?: boolean;
+  controlled_restart_required?: boolean;
+  status?: string;
+  error?: string | null;
+};
+
 function ModelsPanel({ token }: { token: string }) {
   const queryClient = useQueryClient();
   const [name, setName] = useState('');
   const [revision, setRevision] = useState('');
-  const query = useQuery({ queryKey: ['models'],
-    queryFn: () => api<{ active_model: string; candidate: Record<string, unknown> | null;
-      rollback_available: boolean; models: ModelInfo[] }>('admin/models', token) });
-  const refresh = () => queryClient.invalidateQueries({ queryKey: ['models'] });
-  const check = useMutation({ mutationFn: () => api<Record<string, unknown>>('admin/models/check', token, {
-    method: 'POST', body: JSON.stringify({ name: name || query.data?.active_model, revision }),
-  }) });
-  const load = useMutation({ mutationFn: () => api<Record<string, unknown>>('admin/models/load', token, {
-    method: 'POST', body: JSON.stringify({ name: name || query.data?.active_model, revision }),
-  }), onSuccess: refresh });
-  const activate = useMutation({ mutationFn: () => api<Record<string, unknown>>(
-    'admin/models/activate', token,
-    { method: 'POST', body: JSON.stringify({ confirm: 'ACTIVATE' }) }), onSuccess: refresh });
-  const rollback = useMutation({ mutationFn: () => api<Record<string, unknown>>(
-    'admin/runtime/rollback', token, { method: 'POST' }), onSuccess: refresh });
-  if (!query.data) return <div className="skeleton">Loading…</div>;
-  return <section><h2>Models</h2><div className="form-grid">
-    <label>Candidate model<input aria-label="Candidate model" value={name || query.data.active_model}
-      onChange={(event) => setName(event.target.value)} /></label>
-    <label>Immutable revision<input aria-label="Immutable revision" value={revision}
-      onChange={(event) => setRevision(event.target.value)} placeholder="7–40 hex characters" /></label>
-  </div><div className="actions">
-    <button className="secondary" disabled={!revision || check.isPending}
-      onClick={() => check.mutate()}>Check</button>
-    <button className="secondary" disabled={!revision || load.isPending}
-      onClick={() => load.mutate()}>Load candidate</button>
-    <button disabled={!query.data.candidate || activate.isPending} onClick={() => {
-      if (window.confirm('Activate the warmed candidate model?')) activate.mutate();
-    }}>Activate candidate</button>
-    <button className="danger" disabled={!query.data.rollback_available || rollback.isPending}
-      onClick={() => rollback.mutate()}>Rollback model</button>
-  </div>
-  {check.data && <p>{check.data.valid ? 'Candidate is valid.' : 'Candidate cannot be loaded.'}</p>}
-  {load.data?.controlled_restart_required === true &&
-    <p>Insufficient memory: controlled restart required.</p>}
-  {(check.error || load.error || activate.error || rollback.error) &&
-    <p className="error">{String(check.error || load.error || activate.error || rollback.error)}</p>}
-  <div className="run-list">{query.data.models.map((model) =>
-    <article key={model.name}><header><strong>{model.name}</strong>
-      <span>{model.loaded ? 'Active · ready' : model.status}</span></header>
-      <dl className="details"><div><dt>Revision</dt><dd>{model.revision || 'Not loaded'}</dd></div>
-        <div><dt>Devices</dt><dd>{model.device_support.join(', ')}</dd></div>
-        <div><dt>Max length</dt><dd>{model.max_length}</dd></div>
-        <div><dt>Estimated memory</dt><dd>{(model.estimated_memory_bytes / 1e9).toFixed(1)} GB</dd></div>
-        <div><dt>Average latency</dt><dd>{model.average_latency_ms?.toFixed(1) || 'No data'} ms</dd></div>
-      </dl></article>)}</div></section>;
+
+  const query = useQuery({
+    queryKey: ['models'],
+    queryFn: () => api<ModelsResponse>('admin/models', token),
+    retry: false,
+  });
+
+  // Do not return invalidateQueries() from mutation callbacks. React Query waits
+  // for a returned Promise, which can leave the mutation visually pending while
+  // a refetch is slow or unavailable.
+  const refresh = () => {
+    void queryClient.invalidateQueries({ queryKey: ['models'] });
+    void queryClient.invalidateQueries({ queryKey: ['runtime'] });
+    void queryClient.invalidateQueries({ queryKey: ['system-health'] });
+    void queryClient.invalidateQueries({ queryKey: ['dashboard'] });
+  };
+
+  const candidateName = (name.trim() || query.data?.active_model || '').trim();
+
+  const candidateBody = (): { name: string; revision?: string } => {
+    const body: { name: string; revision?: string } = { name: candidateName };
+    const pinnedRevision = revision.trim();
+    // Empty revision intentionally means "resolve current Hugging Face main".
+    if (pinnedRevision) body.revision = pinnedRevision;
+    return body;
+  };
+
+  const check = useMutation({
+    mutationFn: () => api<ModelCandidateResult>('admin/models/check', token, {
+      method: 'POST',
+      body: JSON.stringify(candidateBody()),
+    }),
+    onSuccess: (result) => {
+      // Backend resolves main/tag/short SHA to an immutable full SHA.
+      if (typeof result.revision === 'string' && result.revision) {
+        setRevision(result.revision);
+      }
+    },
+  });
+
+  const load = useMutation({
+    mutationFn: () => api<ModelCandidateResult>('admin/models/load', token, {
+      method: 'POST',
+      body: JSON.stringify(candidateBody()),
+    }),
+    onSuccess: (result) => {
+      if (typeof result.revision === 'string' && result.revision) {
+        setRevision(result.revision);
+      }
+      refresh();
+    },
+    onError: () => {
+      // A failed load may still have updated candidate/error state in runtime.
+      refresh();
+    },
+  });
+
+  const activate = useMutation({
+    mutationFn: () => api<ModelCandidateResult>(
+      'admin/models/activate',
+      token,
+      { method: 'POST', body: JSON.stringify({ confirm: 'ACTIVATE' }) },
+    ),
+    onSuccess: (result) => {
+      if (typeof result.revision === 'string' && result.revision) {
+        setRevision(result.revision);
+      }
+      refresh();
+    },
+    onError: refresh,
+  });
+
+  const rollback = useMutation({
+    mutationFn: () => api<ModelCandidateResult>(
+      'admin/runtime/rollback',
+      token,
+      { method: 'POST' },
+    ),
+    onSuccess: refresh,
+    onError: refresh,
+  });
+
+  const busy = check.isPending || load.isPending || activate.isPending || rollback.isPending;
+  const candidateStatus = typeof query.data?.candidate?.status === 'string'
+    ? query.data.candidate.status
+    : null;
+  const candidateReady = Boolean(query.data?.candidate)
+    && (candidateStatus === null || candidateStatus === 'ready');
+
+  const operationError = check.error || load.error || activate.error || rollback.error;
+
+  if (query.isLoading) return <div className="skeleton">Loading…</div>;
+
+  // Previously `!query.data` always rendered "Loading…" even after a failed
+  // request, producing an endless loading indicator.
+  if (query.error) {
+    return <section>
+      <h2>Models</h2>
+      <p className="error" role="alert">{query.error.message}</p>
+      <button className="secondary" onClick={() => { void query.refetch(); }}>Retry</button>
+    </section>;
+  }
+
+  if (!query.data) {
+    return <section>
+      <h2>Models</h2>
+      <p className="error" role="alert">Model state is unavailable.</p>
+      <button className="secondary" onClick={() => { void query.refetch(); }}>Retry</button>
+    </section>;
+  }
+
+  return <section>
+    <h2>Models</h2>
+
+    <div className="form-grid">
+      <label>
+        Candidate model
+        <input
+          aria-label="Candidate model"
+          value={name || query.data.active_model}
+          onChange={(event) => {
+            setName(event.target.value);
+            setRevision('');
+            check.reset();
+            load.reset();
+          }}
+        />
+      </label>
+
+      <label>
+        Immutable revision
+        <input
+          aria-label="Immutable revision"
+          value={revision}
+          onChange={(event) => {
+            setRevision(event.target.value);
+            check.reset();
+            load.reset();
+          }}
+          placeholder="Auto: current Hugging Face main"
+        />
+      </label>
+    </div>
+
+    <p>
+      Leave revision empty to resolve the current Hugging Face <code>main</code>.
+      Check pins it to an immutable commit SHA before loading.
+    </p>
+
+    <div className="actions">
+      <button
+        className="secondary"
+        disabled={!candidateName || busy}
+        onClick={() => check.mutate()}
+      >
+        {check.isPending ? 'Checking…' : 'Check'}
+      </button>
+
+      <button
+        className="secondary"
+        disabled={!candidateName || busy}
+        onClick={() => load.mutate()}
+      >
+        {load.isPending ? 'Loading candidate…' : 'Load candidate'}
+      </button>
+
+      <button
+        disabled={!candidateReady || busy}
+        onClick={() => {
+          if (window.confirm('Activate the warmed candidate model?')) activate.mutate();
+        }}
+      >
+        {activate.isPending ? 'Activating…' : 'Activate candidate'}
+      </button>
+
+      <button
+        className="danger"
+        disabled={!query.data.rollback_available || busy}
+        onClick={() => rollback.mutate()}
+      >
+        {rollback.isPending ? 'Rolling back…' : 'Rollback model'}
+      </button>
+    </div>
+
+    {check.data && <p className={check.data.valid ? 'success' : 'error'}>
+      {check.data.valid
+        ? <><span>Candidate is valid.</span>{' '}
+          Pinned revision: {check.data.revision || 'unavailable'}</>
+        : `Candidate cannot be loaded${check.data.error ? `: ${check.data.error}` : '.'}`}
+    </p>}
+
+    {load.data?.controlled_restart_required === true &&
+      <p>Insufficient memory: controlled restart required.</p>}
+
+    {candidateStatus && <p>Candidate status: <strong>{candidateStatus}</strong></p>}
+
+    {operationError &&
+      <p className="error" role="alert">
+        {operationError instanceof Error ? operationError.message : String(operationError)}
+      </p>}
+
+    <div className="run-list">
+      {query.data.models.map((model) =>
+        <article key={model.name}>
+          <header>
+            <strong>{model.name}</strong>
+            <span>{model.loaded ? 'Active · ready' : model.status}</span>
+          </header>
+          <dl className="details">
+            <div><dt>Revision</dt><dd>{model.revision || 'Not loaded'}</dd></div>
+            <div><dt>Devices</dt><dd>{model.device_support.join(', ')}</dd></div>
+            <div><dt>Max length</dt><dd>{model.max_length}</dd></div>
+            <div><dt>Estimated memory</dt><dd>{(model.estimated_memory_bytes / 1e9).toFixed(1)} GB</dd></div>
+            <div><dt>Average latency</dt><dd>{model.average_latency_ms?.toFixed(1) || 'No data'} ms</dd></div>
+          </dl>
+        </article>)}
+    </div>
+  </section>;
 }
 
 type RequestRecord = {

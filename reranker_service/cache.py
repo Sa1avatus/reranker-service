@@ -23,6 +23,8 @@ class ScoreCache:
             (
                 self.settings.model,
                 self.settings.model_revision,
+                self.settings.backend,
+                self.settings.precision,
                 normalize_text(query),
                 normalize_text(document),
                 str(self.settings.max_length),

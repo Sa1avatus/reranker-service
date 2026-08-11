@@ -5,7 +5,7 @@ description = "Production-oriented cross-encoder reranking service"
 requires-python = ">=3.12,<3.13"
 dependencies = [
   "fastapi==0.116.1", "uvicorn[standard]==0.35.0", "pydantic==2.11.7",
-  "pydantic-settings==2.10.1", "sentence-transformers==5.0.0", "torch==2.7.1",
+  "pydantic-settings==2.10.1",
   "redis==6.2.0", "httpx==0.28.1", "structlog==25.4.0",
   "prometheus-client==0.22.1", "opentelemetry-api==1.35.0",
   "opentelemetry-sdk==1.35.0", "opentelemetry-instrumentation-fastapi==0.56b0",
@@ -14,6 +14,22 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest==8.4.1", "pytest-asyncio==1.1.0", "pytest-cov==6.2.1", "mypy==1.17.0", "ruff==0.12.5"]
+legacy = [
+  "sentence-transformers==5.4.1", "torch==2.7.1", "transformers==5.7.0",
+  "huggingface-hub==1.27.0"
+]
+jina = ["numpy==2.3.5", "torch==2.7.1", "transformers==4.57.1"]
+onnx-cpu = ["numpy==2.3.5", "onnxruntime==1.26.0", "tokenizers==0.23.1"]
+onnx-gpu = ["numpy==2.3.5", "onnxruntime-gpu==1.26.0", "tokenizers==0.23.1"]
+exporter = [
+  "huggingface-hub==0.36.2", "numpy==2.3.5", "onnx==1.22.0",
+  "onnxruntime==1.26.0", "optimum==2.1.0", "optimum-onnx[onnxruntime]==0.1.0",
+  "tokenizers==0.22.2",
+  "torch==2.13.0", "transformers==4.57.1"
+]
+
+[project.scripts]
+reranker-export-onnx = "reranker_service.exporter:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

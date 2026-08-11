@@ -50,7 +50,20 @@ def create_app(settings: Settings | None = None, *, load_model: bool = True) -> 
     @asynccontextmanager
     async def lifespan(app: FastAPI):  # type: ignore[no-untyped-def]
         await batcher.start()
-        app.state.model_task = asyncio.create_task(runtime.load()) if load_model else None
+        async def load_runtime() -> None:
+            try:
+                await runtime.load()
+            except Exception as exc:
+                log.error(
+                    "model_load_failed",
+                    backend=cfg.backend,
+                    model=cfg.model,
+                    revision=cfg.model_revision,
+                    requested_device=cfg.device,
+                    error_type=type(exc).__name__,
+                )
+
+        app.state.model_task = asyncio.create_task(load_runtime()) if load_model else None
         if not load_model:
             runtime.model, runtime.ready = "injected", True
         yield
@@ -65,7 +78,8 @@ def create_app(settings: Settings | None = None, *, load_model: bool = True) -> 
         title="Reranker Service",
         version="1.0.0",
         lifespan=lifespan,
-        docs_url="/docs",
+        docs_url=None,
+        openapi_url=None,
         redoc_url=None,
     )
     app.state.settings, app.state.runtime = cfg, runtime
@@ -159,11 +173,16 @@ def create_app(settings: Settings | None = None, *, load_model: bool = True) -> 
 
     @app.get("/health/ready")
     async def ready() -> JSONResponse:
+        runtime_state = runtime.state()
+        backend_metadata = runtime_state["backend"]
         body = {
             "status": "ready" if runtime.ready else "not_ready",
             "model_ready": runtime.ready,
             "redis": "up" if await cache.ping() else "degraded",
             "error": runtime.load_error,
+            "backend": backend_metadata,
+            "degraded": runtime_state["degraded"],
+            "reason": runtime_state["degraded_reason"],
         }
         return JSONResponse(body, status_code=200 if runtime.ready else 503)
 
@@ -176,6 +195,8 @@ def create_app(settings: Settings | None = None, *, load_model: bool = True) -> 
                     "revision": cfg.model_revision,
                     "loaded": runtime.ready,
                     "device": runtime.device,
+                    "backend": runtime.backend.metadata(runtime.model),
+                    "capabilities": runtime.backend.capabilities().as_dict(),
                 }
             ]
         }
@@ -188,6 +209,8 @@ def create_app(settings: Settings | None = None, *, load_model: bool = True) -> 
             "device": runtime.device,
             "ready": runtime.ready,
             "max_length": cfg.max_length,
+            "backend": runtime.backend.metadata(runtime.model),
+            "capabilities": runtime.backend.capabilities().as_dict(),
         }
 
     @app.post("/v1/rerank", response_model=RerankResponse, dependencies=service_deps)
@@ -214,7 +237,7 @@ def create_app(settings: Settings | None = None, *, load_model: bool = True) -> 
             latency_ms=round((time.perf_counter() - started) * 1000),
         )
 
-    @app.get("/metrics")
+    @app.get("/metrics", dependencies=service_deps)
     async def metrics() -> Response:
         return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
@@ -226,6 +249,8 @@ def create_app(settings: Settings | None = None, *, load_model: bool = True) -> 
                 "revision": cfg.model_revision,
                 "ready": runtime.ready,
                 "device": runtime.device,
+                "backend": runtime.backend.metadata(runtime.model),
+                "capabilities": runtime.backend.capabilities().as_dict(),
             },
             "redis": {"available": await cache.ping()},
             "resources": admin.resources(),

@@ -2,7 +2,14 @@ import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { describe, expect, it, vi } from 'vitest';
 
-import { App, Login, parseDocuments } from './main';
+import {
+  App,
+  loadPlaygroundState,
+  Login,
+  parseDocuments,
+  PLAYGROUND_STORAGE_KEY,
+  savePlaygroundState,
+} from './main';
 
 describe('document imports', () => {
   it('preserves JSON document IDs and metadata', () => {
@@ -42,6 +49,142 @@ describe('authentication', () => {
     expect(sessionStorage.getItem('adminToken')).toBeNull();
     expect(screen.getByRole('button', { name: 'Sign in' })).toBeTruthy();
     vi.unstubAllGlobals();
+  });
+});
+
+describe('Rerank Playground persistence', () => {
+  const renderApp = () => render(
+    <QueryClientProvider client={new QueryClient()}><App /></QueryClientProvider>,
+  );
+
+  const openPlayground = () => {
+    sessionStorage.setItem('adminToken', 'admin-secret');
+    location.hash = 'Rerank%20Playground';
+  };
+
+  it('autosaves and restores query, ordered documents, and top_n after a reload', async () => {
+    openPlayground();
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => ({}) }));
+    const firstRender = renderApp();
+
+    fireEvent.change(screen.getByLabelText('Query'), { target: { value: 'Persistent query' } });
+    fireEvent.change(screen.getByLabelText('Document ID 1'), { target: { value: 'first' } });
+    fireEvent.change(screen.getByLabelText('Document text 1'), { target: { value: 'First text' } });
+    fireEvent.change(screen.getByLabelText('Document ID 2'), { target: { value: 'second' } });
+    fireEvent.change(screen.getByLabelText('Document text 2'), { target: { value: 'Second text' } });
+    fireEvent.click(screen.getAllByRole('button', { name: 'Move down' })[0]);
+    fireEvent.change(screen.getByLabelText('Top N'), { target: { value: '2' } });
+
+    await waitFor(() => {
+      const saved = JSON.parse(localStorage.getItem(PLAYGROUND_STORAGE_KEY) || '{}');
+      expect(saved.query).toBe('Persistent query');
+      expect(saved.documents.map((document: { id: string }) => document.id)).toEqual(['second', 'first']);
+      expect(saved.top_n).toBe(2);
+    });
+    firstRender.unmount();
+
+    renderApp();
+    expect((screen.getByLabelText('Query') as HTMLTextAreaElement).value).toBe('Persistent query');
+    expect((screen.getByLabelText('Document ID 1') as HTMLInputElement).value).toBe('second');
+    expect((screen.getByLabelText('Document text 1') as HTMLTextAreaElement).value).toBe('Second text');
+    expect((screen.getByLabelText('Document ID 2') as HTMLInputElement).value).toBe('first');
+    expect((screen.getByLabelText('Document text 2') as HTMLTextAreaElement).value).toBe('First text');
+    expect((screen.getByLabelText('Top N') as HTMLInputElement).value).toBe('2');
+    vi.unstubAllGlobals();
+  });
+
+  it('keeps restored documents and metadata after rerank and active model changes', async () => {
+    savePlaygroundState({
+      query: 'Model-independent query',
+      documents: [
+        { id: 'doc-b', text: 'Second', metadata: { order: 2 } },
+        { id: 'doc-a', text: 'First', metadata: { order: 1 } },
+      ],
+      top_n: 2,
+    });
+    openPlayground();
+    const fetchMock = vi.fn().mockImplementation(async (url: string, options?: RequestInit) => {
+      if (url.endsWith('/admin/models') && !options?.method) return { ok: true, json: async () => ({
+        active_model: 'active-model', candidate: { name: 'candidate-model' }, rollback_available: false,
+        models: [{ name: 'active-model', revision: 'abcdef1', status: 'ready', loaded: true,
+          device_support: ['cpu'], max_length: 1024, estimated_memory_bytes: 1000,
+          average_latency_ms: 1 }],
+      }) };
+      return { ok: true, json: async () => ({ results: [] }) };
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true);
+    renderApp();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Run rerank' }));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith('/v1/admin/rerank',
+      expect.objectContaining({ method: 'POST' })));
+    const rerankCall = fetchMock.mock.calls.find(([url]) => url === '/v1/admin/rerank');
+    expect(JSON.parse(rerankCall?.[1]?.body as string).documents).toEqual([
+      { id: 'doc-b', text: 'Second', metadata: { order: 2 } },
+      { id: 'doc-a', text: 'First', metadata: { order: 1 } },
+    ]);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Models' }));
+    await screen.findByDisplayValue('active-model');
+    fireEvent.click(screen.getByRole('button', { name: 'Activate candidate' }));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith('/v1/admin/models/activate',
+      expect.objectContaining({ method: 'POST' })));
+    fireEvent.click(screen.getByRole('button', { name: 'Rerank Playground' }));
+    expect((screen.getByLabelText('Query') as HTMLTextAreaElement).value).toBe('Model-independent query');
+    expect((screen.getByLabelText('Document ID 1') as HTMLInputElement).value).toBe('doc-b');
+    expect((screen.getByLabelText('Document ID 2') as HTMLInputElement).value).toBe('doc-a');
+    expect(localStorage.getItem(PLAYGROUND_STORAGE_KEY)).not.toBeNull();
+    confirm.mockRestore();
+    vi.unstubAllGlobals();
+  });
+
+  it('clears the UI and leaves no persisted state after the debounce', async () => {
+    savePlaygroundState({
+      query: 'Clear me', documents: [{ id: 'doc-1', text: 'Text', metadata: {} }], top_n: 1,
+    });
+    openPlayground();
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => ({}) }));
+    renderApp();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Clear Playground' }));
+    expect((screen.getByLabelText('Query') as HTMLTextAreaElement).value).toBe('');
+    expect(screen.queryByLabelText('Document ID 1')).toBeNull();
+    expect((screen.getByLabelText('Top N') as HTMLInputElement).value).toBe('10');
+    expect(localStorage.getItem(PLAYGROUND_STORAGE_KEY)).toBeNull();
+    await new Promise((resolve) => window.setTimeout(resolve, 350));
+    expect(localStorage.getItem(PLAYGROUND_STORAGE_KEY)).toBeNull();
+    vi.unstubAllGlobals();
+  });
+
+  it('falls back safely for corrupt JSON and unknown schema versions', () => {
+    localStorage.setItem(PLAYGROUND_STORAGE_KEY, '{broken');
+    expect(() => loadPlaygroundState()).not.toThrow();
+    expect(loadPlaygroundState().version).toBe(1);
+
+    localStorage.setItem(PLAYGROUND_STORAGE_KEY, JSON.stringify({ version: 99, query: 'stale' }));
+    openPlayground();
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => ({}) }));
+    renderApp();
+    expect(screen.getByRole('heading', { name: 'Rerank Playground' })).toBeTruthy();
+    expect((screen.getByLabelText('Query') as HTMLTextAreaElement).value)
+      .toBe("Describe the candidate's Kubernetes experience");
+    vi.unstubAllGlobals();
+  });
+
+  it('serializes only allowlisted Playground fields and never secrets', () => {
+    const stateWithSecrets = {
+      query: 'Safe query', documents: [{ id: 'doc-1', text: 'Safe text', metadata: {} }], top_n: 1,
+      api_key: 'service-secret', admin_token: 'admin-secret', Authorization: 'Bearer secret',
+      results: [{ score: 1 }],
+    };
+    savePlaygroundState(stateWithSecrets);
+    const raw = localStorage.getItem(PLAYGROUND_STORAGE_KEY) || '';
+    expect(Object.keys(JSON.parse(raw)).sort()).toEqual(['documents', 'query', 'top_n', 'version']);
+    expect(raw).not.toContain('service-secret');
+    expect(raw).not.toContain('admin-secret');
+    expect(raw).not.toContain('Bearer secret');
+    expect(raw).not.toContain('score');
   });
 });
 

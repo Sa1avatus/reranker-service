@@ -8,19 +8,18 @@ services:
     restart: unless-stopped
     deploy: {resources: {limits: {memory: 384M, cpus: "1.0"}}}
   reranker-api:
-    build: {context: ., target: runtime-gpu}
-    gpus: all
+    build: {context: ., target: runtime-cpu}
     env_file:
       - path: .env
         required: false
     environment:
       RERANKER_REDIS_URL: redis://reranker-redis:6379/0
-      RERANKER_BACKEND: ${RERANKER_BACKEND:-onnx_pairwise}
-      RERANKER_DEVICE: ${RERANKER_DEVICE:-auto}
-      RERANKER_MODEL_REVISION: ${RERANKER_MODEL_REVISION:-953dc6f6f85a1b2dbfca4c34a2796e7dde08d41e}
-      RERANKER_ONNX_PROVIDERS: ${RERANKER_ONNX_PROVIDERS:-CUDAExecutionProvider,CPUExecutionProvider}
+      RERANKER_BACKEND: onnx
+      RERANKER_MODEL_REVISION: 953dc6f6f85a1b2dbfca4c34a2796e7dde08d41e
+      RERANKER_DEVICE: cpu
+      RERANKER_ONNX_PROVIDERS: CPUExecutionProvider
       RERANKER_ARTIFACT_ROOT: /models/artifacts
-      RERANKER_CPU_FALLBACK_ENABLED: ${RERANKER_CPU_FALLBACK_ENABLED:-true}
+      RERANKER_PRECISION: fp32
     ports: ["8200:8200"]
     volumes: ["model-cache:/models"]
     depends_on: {reranker-redis: {condition: service_healthy}}

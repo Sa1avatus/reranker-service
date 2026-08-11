@@ -1,0 +1,17 @@
+{
+  "query": "Candidate profile: Python, FastAPI, machine learning, LLM, RAG, Docker and production backend systems.",
+  "documents": [
+    {"id": "python-backend", "text": "Python Backend Engineer building production FastAPI services and Docker deployments.", "group": "relevant"},
+    {"id": "ml-engineer", "text": "Machine Learning Engineer developing and deploying Python ML systems.", "group": "relevant"},
+    {"id": "ai-engineer", "text": "AI Engineer working with Python, LLM applications and production APIs.", "group": "relevant"},
+    {"id": "llm-engineer", "text": "LLM Engineer building retrieval augmented generation services with FastAPI.", "group": "relevant"},
+    {"id": "rag-engineer", "text": "RAG Engineer for vector retrieval, reranking and Python backend systems.", "group": "relevant"},
+    {"id": "mlops", "text": "MLOps Engineer operating Docker-based machine learning inference services.", "group": "relevant"},
+    {"id": "sous-chef", "text": "Sous Chef responsible for kitchen preparation, menu execution and food safety.", "group": "hard_negative"},
+    {"id": "hr", "text": "Human Resources specialist managing employee relations and recruiting operations.", "group": "hard_negative"},
+    {"id": "sales", "text": "Sales representative responsible for prospecting and account revenue.", "group": "hard_negative"},
+    {"id": "accountant", "text": "Accountant preparing financial statements, tax records and reconciliations.", "group": "hard_negative"},
+    {"id": "nurse", "text": "Registered Nurse providing bedside care and clinical patient monitoring.", "group": "hard_negative"},
+    {"id": "marketing", "text": "Marketing manager planning brand campaigns and social media content.", "group": "hard_negative"}
+  ]
+}

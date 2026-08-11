@@ -10,6 +10,22 @@ def test_cache_key_is_private_and_stable(settings):
     assert "private" not in key
 
 
+def test_cache_key_separates_backend_precision_and_revision(settings):
+    cache = ScoreCache(settings)
+    original = cache.key("query", "document")
+
+    settings.backend = "onnx_pairwise"
+    assert cache.key("query", "document") != original
+    onnx_fp32 = cache.key("query", "document")
+
+    settings.precision = "fp16"
+    assert cache.key("query", "document") != onnx_fp32
+    onnx_fp16 = cache.key("query", "document")
+
+    settings.model_revision = "f" * 40
+    assert cache.key("query", "document") != onnx_fp16
+
+
 @pytest.mark.asyncio
 async def test_redis_failure_degrades(settings):
     settings.cache_enabled = True

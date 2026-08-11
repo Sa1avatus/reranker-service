@@ -18,6 +18,9 @@ def settings() -> Settings:
         RERANKER_ADMIN_TOKEN="admin-key",
         RERANKER_MOCK_MODEL=True,
         RERANKER_CACHE_ENABLED=False,
+        RERANKER_BACKEND="legacy_cross_encoder",
+        RERANKER_DEVICE="cpu",
+        RERANKER_MODEL_REVISION="953dc6f",
     )
 
 

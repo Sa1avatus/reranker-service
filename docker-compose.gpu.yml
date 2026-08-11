@@ -1,0 +1,12 @@
+services:
+  reranker-api:
+    build: {context: ., target: runtime-gpu}
+    environment:
+      RERANKER_REDIS_URL: redis://reranker-redis:6379/0
+      RERANKER_BACKEND: onnx_pairwise
+      RERANKER_MODEL_REVISION: 953dc6f6f85a1b2dbfca4c34a2796e7dde08d41e
+      RERANKER_DEVICE: auto
+      RERANKER_ONNX_PROVIDERS: CUDAExecutionProvider,CPUExecutionProvider
+      RERANKER_ARTIFACT_ROOT: /models/artifacts
+      RERANKER_CPU_FALLBACK_ENABLED: "true"
+      RERANKER_PRECISION: fp32

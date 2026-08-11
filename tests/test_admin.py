@@ -172,14 +172,16 @@ def test_model_candidate_activation_and_rollback(client, admin_auth, auth, paylo
     assert rolled_back.json()["revision"] == original_revision
 
 
-def test_model_candidate_revision_is_immutable_sha(client, admin_auth):
+def test_model_candidate_accepts_floating_revision_and_reports_resolution(client, admin_auth):
     model_name = client.app.state.settings.model
     response = client.post(
         "/v1/admin/models/check",
         json={"name": model_name, "revision": "main"},
         headers=admin_auth,
     )
-    assert response.status_code == 422
+    assert response.status_code == 200
+    assert response.json()["requested_revision"] == "main"
+    assert response.json()["resolved_revision"] == "main"
     assert (
         client.post(
             "/v1/admin/benchmarks", json={"mode": "exclusive"}, headers=admin_auth

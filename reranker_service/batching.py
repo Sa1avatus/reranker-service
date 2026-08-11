@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from typing import Protocol
 
 from .config import Settings
+from .errors import ServiceError
 from .metrics import QUEUE_WAIT
 
 
@@ -27,7 +28,7 @@ class DynamicBatcher:
     def __init__(self, settings: Settings, predictor: PairPredictor) -> None:
         self.settings = settings
         self.predictor = predictor
-        self.queue: asyncio.Queue[BatchJob] = asyncio.Queue()
+        self.queue: asyncio.Queue[BatchJob] = asyncio.Queue(maxsize=settings.max_queue_size)
         self._worker: asyncio.Task[None] | None = None
 
     @property
@@ -61,7 +62,10 @@ class DynamicBatcher:
         if self._worker is None:
             raise RuntimeError("dynamic batcher is not started")
         future: asyncio.Future[list[float]] = asyncio.get_running_loop().create_future()
-        await self.queue.put(BatchJob(pairs=pairs, future=future))
+        try:
+            self.queue.put_nowait(BatchJob(pairs=pairs, future=future))
+        except asyncio.QueueFull as exc:
+            raise ServiceError(429, "reranker_overloaded", "reranker queue is full") from exc
         return await future
 
     async def _run(self) -> None:
@@ -82,13 +86,24 @@ class DynamicBatcher:
         while active:
             combined: list[tuple[str, str]] = []
             slices: list[tuple[BatchJob, int]] = []
+            combined_tokens = 0
             for job in active:
-                capacity = self.settings.max_batch_pairs - len(combined)
-                if capacity <= 0:
+                if len(combined) >= self.settings.max_batch_pairs:
                     break
-                count = min(capacity, len(job.pairs) - job.cursor)
+                count = 0
+                while job.cursor + count < len(job.pairs):
+                    if len(combined) >= self.settings.max_batch_pairs:
+                        break
+                    pair = job.pairs[job.cursor + count]
+                    pair_tokens = max(1, len(pair[0].split()) + len(pair[1].split()))
+                    if combined and combined_tokens + pair_tokens > self.settings.max_batch_tokens:
+                        break
+                    combined.append(pair)
+                    combined_tokens += pair_tokens
+                    count += 1
+                    if combined_tokens >= self.settings.max_batch_tokens:
+                        break
                 if count:
-                    combined.extend(job.pairs[job.cursor : job.cursor + count])
                     slices.append((job, count))
             if not combined:
                 return
