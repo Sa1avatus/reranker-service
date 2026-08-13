@@ -804,16 +804,17 @@ function RequestsPanel({ token }: { token: string }) {
   });
   if (!query.data) return <div className="skeleton">Loading…</div>;
   return <section><header><h2>Requests</h2><span>{query.data.total} retained technical records</span></header>
-    <div className="table-wrap"><table><thead><tr><th style={{width: 30}}></th><th>Request</th><th>Correlation</th><th>Documents</th>
+    <div className="table-wrap"><table><thead><tr><th style={{width: 30}}></th><th>Request</th><th>Correlation</th><th>Time</th><th>Documents</th>
       <th>Model / device</th><th>Latency</th><th>Cache</th><th>Status</th></tr></thead><tbody>
       {query.data.items.map((item) => <React.Fragment key={`${item.request_id}-${item.timestamp}`}>
         <tr className="request-row" onClick={() => setExpandedId(expandedId === item.request_id ? null : item.request_id)}>
           <td className="expand-toggle">{expandedId === item.request_id ? '▼' : '▶'}</td>
           <td title={item.request_id}>{item.request_id.slice(0, 8)}</td>
           <td title={item.correlation_id}>{item.correlation_id.slice(0, 12)}</td>
+          <td><small>{new Date(item.timestamp * 1000).toLocaleString()}</small></td>
           <td>{item.documents_count}</td><td>{item.model}<br /><small>{item.device}</small></td>
           <td>{item.latency_ms}ms</td><td>{item.cache_hits}</td><td>{item.status}</td></tr>
-        {expandedId === item.request_id && <tr className="request-detail-row"><td colSpan={8}>
+        {expandedId === item.request_id && <tr className="request-detail-row"><td colSpan={9}>
           {detail.isLoading && <div className="skeleton">Loading details…</div>}
           {detail.error && <p className="error">{detail.error.message}</p>}
           {detail.data && <>
@@ -841,6 +842,8 @@ function RequestsPanel({ token }: { token: string }) {
                 </tr>)}
               </tbody></table>
             </div>}
+            {!detail.data.query && !detail.data.results?.length && !detail.data.documents?.length &&
+              <div className="detail-section"><p style={{color: '#9fb3ad', margin: 0}}>No request payload recorded (legacy record)</p></div>}
           </>}
         </td></tr>}
       </React.Fragment>)}
