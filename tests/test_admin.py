@@ -101,8 +101,9 @@ def test_admin_playground_uses_admin_token_not_service_key(client, admin_auth, p
     recorded = client.get("/v1/admin/requests", headers=admin_auth).json()["items"][0]
     assert recorded["correlation_id"] == "correlation-123"
     assert recorded["pairs_count"] == 2
-    assert "query" not in recorded
-    assert "text" not in recorded
+    assert recorded["query"] == payload["query"]
+    assert len(recorded["documents"]) == len(payload["documents"])
+    assert len(recorded["results"]) == 2
 
 
 def test_request_filters_and_batch_accounting(client, admin_auth, auth, payload):

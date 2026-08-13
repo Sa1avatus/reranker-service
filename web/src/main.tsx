@@ -21,12 +21,17 @@ const paths: Partial<Record<Section, string>> = {
   'System Health': 'system/health', Settings: 'runtime', 'Audit Log': 'audit-log',
 };
 
-export async function api<T>(url: string, token: string, options: RequestInit = {}): Promise<T> {
+let _activeBackend: string = sessionStorage.getItem('reranker.activeBackend') || '';
+export function setActiveBackend(id: string) { _activeBackend = id; }
+
+export async function api<T>(url: string, token: string, options: RequestInit = {}, backend?: string): Promise<T> {
+  const backendHeader: Record<string, string> = _activeBackend ? { 'X-Backend': _activeBackend } : {};
   const response = await fetch(`/v1/${url}`, {
     ...options,
     headers: {
       'Content-Type': 'application/json',
       Authorization: `Bearer ${token}`,
+      ...backendHeader,
       ...options.headers,
     },
   });
@@ -519,14 +524,34 @@ type ModelCandidateResult = {
   error?: string | null;
 };
 
+function fetchApi<T>(url: string, token: string, backend: string, options: RequestInit = {}): Promise<T> {
+  return api<T>(url, token, { ...options, headers: { ...options.headers, 'X-Backend': backend } });
+}
+
+type BackendModels = { backendId: string; backendName: string; data: ModelsResponse };
+type BackendsResponse = { backends: Array<{ id: string; name: string; backend: string }>; model_map: Record<string, string> };
+
 function ModelsPanel({ token }: { token: string }) {
   const queryClient = useQueryClient();
   const [name, setName] = useState('');
   const [revision, setRevision] = useState('');
+  const [modelMap, setModelMap] = useState<Record<string, string>>({});
 
-  const query = useQuery({
-    queryKey: ['models'],
-    queryFn: () => api<ModelsResponse>('admin/models', token),
+  const allModels = useQuery({
+    queryKey: ['models-all'],
+    queryFn: async () => {
+      const resp = await fetch('/v1/backends');
+      const { backends, model_map } = await resp.json() as BackendsResponse;
+      setModelMap(model_map || {});
+      const results: BackendModels[] = [];
+      for (const b of backends) {
+        try {
+          const data = await fetchApi<ModelsResponse>('admin/models', token, b.id);
+          results.push({ backendId: b.id, backendName: b.name, data });
+        } catch { /* backend may be down */ }
+      }
+      return results;
+    },
     retry: false,
   });
 
@@ -534,13 +559,17 @@ function ModelsPanel({ token }: { token: string }) {
   // for a returned Promise, which can leave the mutation visually pending while
   // a refetch is slow or unavailable.
   const refresh = () => {
-    void queryClient.invalidateQueries({ queryKey: ['models'] });
+    void queryClient.invalidateQueries({ queryKey: ['models-all'] });
     void queryClient.invalidateQueries({ queryKey: ['runtime'] });
     void queryClient.invalidateQueries({ queryKey: ['system-health'] });
     void queryClient.invalidateQueries({ queryKey: ['dashboard'] });
   };
 
-  const candidateName = (name.trim() || query.data?.active_model || '').trim();
+  const activeModels = allModels.data?.find(m => m.backendId === _activeBackend)?.data;
+  const candidateName = (name.trim() || activeModels?.active_model || '').trim();
+
+  // Resolve which backend handles a given model name.
+  const backendForModel = (modelName: string): string | undefined => modelMap[modelName];
 
   const candidateBody = (): { name: string; revision?: string } => {
     const body: { name: string; revision?: string } = { name: candidateName };
@@ -550,8 +579,10 @@ function ModelsPanel({ token }: { token: string }) {
     return body;
   };
 
+  const resolveBackend = () => backendForModel(candidateName) || _activeBackend || 'legacy';
+
   const check = useMutation({
-    mutationFn: () => api<ModelCandidateResult>('admin/models/check', token, {
+    mutationFn: () => fetchApi<ModelCandidateResult>('admin/models/check', token, resolveBackend(), {
       method: 'POST',
       body: JSON.stringify(candidateBody()),
     }),
@@ -564,7 +595,7 @@ function ModelsPanel({ token }: { token: string }) {
   });
 
   const load = useMutation({
-    mutationFn: () => api<ModelCandidateResult>('admin/models/load', token, {
+    mutationFn: () => fetchApi<ModelCandidateResult>('admin/models/load', token, resolveBackend(), {
       method: 'POST',
       body: JSON.stringify(candidateBody()),
     }),
@@ -581,9 +612,8 @@ function ModelsPanel({ token }: { token: string }) {
   });
 
   const activate = useMutation({
-    mutationFn: () => api<ModelCandidateResult>(
-      'admin/models/activate',
-      token,
+    mutationFn: () => fetchApi<ModelCandidateResult>(
+      'admin/models/activate', token, resolveBackend(),
       { method: 'POST', body: JSON.stringify({ confirm: 'ACTIVATE' }) },
     ),
     onSuccess: (result) => {
@@ -596,9 +626,8 @@ function ModelsPanel({ token }: { token: string }) {
   });
 
   const rollback = useMutation({
-    mutationFn: () => api<ModelCandidateResult>(
-      'admin/runtime/rollback',
-      token,
+    mutationFn: () => fetchApi<ModelCandidateResult>(
+      'admin/runtime/rollback', token, resolveBackend(),
       { method: 'POST' },
     ),
     onSuccess: refresh,
@@ -606,31 +635,31 @@ function ModelsPanel({ token }: { token: string }) {
   });
 
   const busy = check.isPending || load.isPending || activate.isPending || rollback.isPending;
-  const candidateStatus = typeof query.data?.candidate?.status === 'string'
-    ? query.data.candidate.status
+  const candidateStatus = typeof activeModels?.candidate?.status === 'string'
+    ? activeModels?.candidate?.status
     : null;
-  const candidateReady = Boolean(query.data?.candidate)
+  const candidateReady = Boolean(activeModels?.candidate)
     && (candidateStatus === null || candidateStatus === 'ready');
 
   const operationError = check.error || load.error || activate.error || rollback.error;
 
-  if (query.isLoading) return <div className="skeleton">Loading…</div>;
+  if (allModels.isLoading) return <div className="skeleton">Loading…</div>;
 
   // Previously `!query.data` always rendered "Loading…" even after a failed
   // request, producing an endless loading indicator.
-  if (query.error) {
+  if (allModels.error) {
     return <section>
       <h2>Models</h2>
-      <p className="error" role="alert">{query.error.message}</p>
-      <button className="secondary" onClick={() => { void query.refetch(); }}>Retry</button>
+      <p className="error" role="alert">{allModels.error.message}</p>
+      <button className="secondary" onClick={() => { void allModels.refetch(); }}>Retry</button>
     </section>;
   }
 
-  if (!query.data) {
+  if (!allModels.data?.length) {
     return <section>
       <h2>Models</h2>
       <p className="error" role="alert">Model state is unavailable.</p>
-      <button className="secondary" onClick={() => { void query.refetch(); }}>Retry</button>
+      <button className="secondary" onClick={() => { void allModels.refetch(); }}>Retry</button>
     </section>;
   }
 
@@ -642,7 +671,7 @@ function ModelsPanel({ token }: { token: string }) {
         Candidate model
         <input
           aria-label="Candidate model"
-          value={name || query.data.active_model}
+          value={name || activeModels?.active_model || ''}
           onChange={(event) => {
             setName(event.target.value);
             setRevision('');
@@ -674,7 +703,7 @@ function ModelsPanel({ token }: { token: string }) {
 
     <div className="actions">
       <button
-        className="secondary"
+        className={`secondary${check.isPending ? ' is-pending' : ''}`}
         disabled={!candidateName || busy}
         onClick={() => check.mutate()}
       >
@@ -682,7 +711,7 @@ function ModelsPanel({ token }: { token: string }) {
       </button>
 
       <button
-        className="secondary"
+        className={`secondary${load.isPending ? ' is-pending' : ''}`}
         disabled={!candidateName || busy}
         onClick={() => load.mutate()}
       >
@@ -690,6 +719,7 @@ function ModelsPanel({ token }: { token: string }) {
       </button>
 
       <button
+        className={activate.isPending ? 'is-pending' : undefined}
         disabled={!candidateReady || busy}
         onClick={() => {
           if (window.confirm('Activate the warmed candidate model?')) activate.mutate();
@@ -699,8 +729,8 @@ function ModelsPanel({ token }: { token: string }) {
       </button>
 
       <button
-        className="danger"
-        disabled={!query.data.rollback_available || busy}
+        className={`danger${rollback.isPending ? ' is-pending' : ''}`}
+        disabled={!activeModels?.rollback_available || busy}
         onClick={() => rollback.mutate()}
       >
         {rollback.isPending ? 'Rolling back…' : 'Rollback model'}
@@ -725,20 +755,26 @@ function ModelsPanel({ token }: { token: string }) {
       </p>}
 
     <div className="run-list">
-      {query.data.models.map((model) =>
-        <article key={model.name}>
-          <header>
-            <strong>{model.name}</strong>
-            <span>{model.loaded ? 'Active · ready' : model.status}</span>
-          </header>
-          <dl className="details">
-            <div><dt>Revision</dt><dd>{model.revision || 'Not loaded'}</dd></div>
-            <div><dt>Devices</dt><dd>{model.device_support.join(', ')}</dd></div>
-            <div><dt>Max length</dt><dd>{model.max_length}</dd></div>
-            <div><dt>Estimated memory</dt><dd>{(model.estimated_memory_bytes / 1e9).toFixed(1)} GB</dd></div>
-            <div><dt>Average latency</dt><dd>{model.average_latency_ms?.toFixed(1) || 'No data'} ms</dd></div>
-          </dl>
-        </article>)}
+      {(allModels.data || []).map(({ backendId, backendName, data }) =>
+        <React.Fragment key={backendId}>
+          <h3>{backendName} <small>({backendId})</small></h3>
+          {data.models.map((model) =>
+            <article key={`${backendId}-${model.name}`} className={model.loaded ? 'active-model' : ''}>
+              <header>
+                <strong>{model.name}</strong>
+                <span className={`status-badge ${model.loaded ? 'active' : 'available'}`}>
+                  {model.loaded ? '● Active · ready' : model.status}
+                </span>
+              </header>
+              <dl className="details">
+                <div><dt>Revision</dt><dd>{model.revision || 'Not loaded'}</dd></div>
+                <div><dt>Devices</dt><dd>{model.device_support.join(', ')}</dd></div>
+                <div><dt>Max length</dt><dd>{model.max_length}</dd></div>
+                <div><dt>Estimated memory</dt><dd>{(model.estimated_memory_bytes / 1e9).toFixed(1)} GB</dd></div>
+                <div><dt>Average latency</dt><dd>{model.average_latency_ms?.toFixed(1) || 'No data'} ms</dd></div>
+              </dl>
+            </article>)}
+        </React.Fragment>)}
     </div>
   </section>;
 }
@@ -749,20 +785,65 @@ type RequestRecord = {
   truncation_count: number;
 };
 
+type RequestDetail = RequestRecord & {
+  query?: string;
+  documents?: Array<{ id: string; text: string }>;
+  results?: Array<{ id: string; score: number; normalized_score: number | null; rank: number; text: string | null; cache_hit: boolean }>;
+};
+
 function RequestsPanel({ token }: { token: string }) {
   const [page, setPage] = useState(1);
+  const [expandedId, setExpandedId] = useState<string | null>(null);
   const query = useQuery({ queryKey: ['requests', page],
     queryFn: () => api<{ items: RequestRecord[]; total: number; size: number }>(
       `admin/requests?page=${page}&size=20`, token) });
+  const detail = useQuery({
+    queryKey: ['request-detail', expandedId],
+    queryFn: () => api<RequestDetail>(`admin/requests/${expandedId}`, token),
+    enabled: expandedId !== null,
+  });
   if (!query.data) return <div className="skeleton">Loading…</div>;
   return <section><header><h2>Requests</h2><span>{query.data.total} retained technical records</span></header>
-    <div className="table-wrap"><table><thead><tr><th>Request</th><th>Correlation</th><th>Documents</th>
+    <div className="table-wrap"><table><thead><tr><th style={{width: 30}}></th><th>Request</th><th>Correlation</th><th>Documents</th>
       <th>Model / device</th><th>Latency</th><th>Cache</th><th>Status</th></tr></thead><tbody>
-      {query.data.items.map((item) => <tr key={`${item.request_id}-${item.timestamp}`}>
-        <td title={item.request_id}>{item.request_id.slice(0, 8)}</td>
-        <td title={item.correlation_id}>{item.correlation_id.slice(0, 12)}</td>
-        <td>{item.documents_count}</td><td>{item.model}<br /><small>{item.device}</small></td>
-        <td>{item.latency_ms}ms</td><td>{item.cache_hits}</td><td>{item.status}</td></tr>)}
+      {query.data.items.map((item) => <React.Fragment key={`${item.request_id}-${item.timestamp}`}>
+        <tr className="request-row" onClick={() => setExpandedId(expandedId === item.request_id ? null : item.request_id)}>
+          <td className="expand-toggle">{expandedId === item.request_id ? '▼' : '▶'}</td>
+          <td title={item.request_id}>{item.request_id.slice(0, 8)}</td>
+          <td title={item.correlation_id}>{item.correlation_id.slice(0, 12)}</td>
+          <td>{item.documents_count}</td><td>{item.model}<br /><small>{item.device}</small></td>
+          <td>{item.latency_ms}ms</td><td>{item.cache_hits}</td><td>{item.status}</td></tr>
+        {expandedId === item.request_id && <tr className="request-detail-row"><td colSpan={8}>
+          {detail.isLoading && <div className="skeleton">Loading details…</div>}
+          {detail.error && <p className="error">{detail.error.message}</p>}
+          {detail.data && <>
+            {detail.data.query && <div className="detail-section">
+              <h4>Query</h4><p className="detail-query">{detail.data.query}</p>
+            </div>}
+            {detail.data.results && detail.data.results.length > 0 && <div className="detail-section">
+              <h4>Results ({detail.data.results.length})</h4>
+              <table className="detail-table"><thead><tr>
+                <th>#</th><th>ID</th><th>Score</th><th>Normalized</th><th>Text</th><th>Cache</th>
+              </tr></thead><tbody>
+                {detail.data.results.map((r) => <tr key={r.id}>
+                  <td>{r.rank}</td><td>{r.id}</td><td>{r.score.toFixed(4)}</td>
+                  <td>{r.normalized_score?.toFixed(4) ?? '—'}</td>
+                  <td className="detail-text">{r.text ?? '—'}</td>
+                  <td>{r.cache_hit ? '✓' : ''}</td>
+                </tr>)}
+              </tbody></table>
+            </div>}
+            {detail.data.documents && detail.data.documents.length > 0 && <div className="detail-section">
+              <h4>Documents ({detail.data.documents.length})</h4>
+              <table className="detail-table"><thead><tr><th>ID</th><th>Text</th></tr></thead><tbody>
+                {detail.data.documents.map((d) => <tr key={d.id}>
+                  <td>{d.id}</td><td className="detail-text">{d.text}</td>
+                </tr>)}
+              </tbody></table>
+            </div>}
+          </>}
+        </td></tr>}
+      </React.Fragment>)}
     </tbody></table></div><div className="actions"><button className="secondary" disabled={page === 1}
       onClick={() => setPage(page - 1)}>Previous</button><span>Page {page}</span>
       <button className="secondary" disabled={page * query.data.size >= query.data.total}
@@ -846,8 +927,17 @@ function DataView({ section, token }: { section: Section; token: string }) {
     onClick={() => query.refetch()}>Refresh</button></header><pre>{JSON.stringify(query.data, null, 2)}</pre></section>;
 }
 
+export const BACKENDS_STORAGE_KEY = 'reranker.activeBackend';
+
 export function App() {
   const [token, setToken] = useState(() => sessionStorage.getItem('adminToken') || '');
+  const [backend, setBackend] = useState(() => sessionStorage.getItem(BACKENDS_STORAGE_KEY) || 'jina');
+  useEffect(() => { setActiveBackend(backend); }, [backend]);
+  const [availableBackends, setAvailableBackends] = useState<Array<{ id: string; name: string; backend: string }>>([]);
+  useEffect(() => { sessionStorage.setItem(BACKENDS_STORAGE_KEY, backend); }, [backend]);
+  useEffect(() => {
+    fetch('/v1/backends').then(r => r.json()).then(d => setAvailableBackends(d.backends || [])).catch(() => {});
+  }, []);
   const [section, setSection] = useState<Section>(() => {
     const hash = decodeURIComponent(location.hash.slice(1));
     return sections.includes(hash as Section) ? hash as Section : 'Dashboard';
@@ -871,6 +961,13 @@ export function App() {
   else if (section === 'Audit Log') content = <AuditLogPanel token={token} />;
   else content = <DataView section={section} token={token} />;
   return <div className="shell"><aside><div className="brand">RR <span>Console</span></div>
+    {availableBackends.length > 1 && <div className="backend-selector">
+      <label>Backend
+        <select value={backend} onChange={(e) => setBackend(e.target.value)}>
+          {availableBackends.map(b => <option key={b.id} value={b.id}>{b.id.charAt(0).toUpperCase() + b.id.slice(1)}</option>)}
+        </select>
+      </label>
+    </div>}
     {sections.map((item) => <button className={item === section ? 'active' : ''}
       onClick={() => setSection(item)} key={item}>{item}</button>)}
     <button onClick={() => { sessionStorage.clear(); setToken(''); }}>Log out</button>

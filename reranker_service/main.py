@@ -148,24 +148,44 @@ def create_app(settings: Settings | None = None, *, load_model: bool = True) -> 
     service_deps = [Depends(security.service_auth), Depends(security.rate_limit)]
     admin_deps = [Depends(security.admin_auth), Depends(security.rate_limit)]
 
-    def record_response(response: RerankResponse, correlation_id: str) -> None:
-        admin.requests.appendleft(
-            {
-                "request_id": str(response.request_id),
-                "correlation_id": correlation_id,
-                "timestamp": time.time(),
-                "documents_count": response.usage.documents_received,
-                "pairs_count": response.usage.documents_scored,
-                "model": response.model,
-                "model_revision": response.model_revision,
-                "device": response.device,
-                "latency_ms": response.usage.latency_ms,
-                "cache_hits": response.usage.cache_hits,
-                "status": "success",
-                "error_code": None,
-                "truncation_count": sum(result.truncated for result in response.results),
-            }
-        )
+    def record_response(
+        response: RerankResponse,
+        correlation_id: str,
+        request_body: RerankRequest | None = None,
+    ) -> None:
+        record: dict[str, Any] = {
+            "request_id": str(response.request_id),
+            "correlation_id": correlation_id,
+            "timestamp": time.time(),
+            "documents_count": response.usage.documents_received,
+            "pairs_count": response.usage.documents_scored,
+            "model": response.model,
+            "model_revision": response.model_revision,
+            "device": response.device,
+            "latency_ms": response.usage.latency_ms,
+            "cache_hits": response.usage.cache_hits,
+            "status": "success",
+            "error_code": None,
+            "truncation_count": sum(result.truncated for result in response.results),
+        }
+        if request_body is not None:
+            record["query"] = request_body.query[:500]
+            record["documents"] = [
+                {"id": doc.id, "text": doc.text[:200]}
+                for doc in request_body.documents
+            ]
+            record["results"] = [
+                {
+                    "id": result.id,
+                    "score": result.score,
+                    "normalized_score": result.normalized_score,
+                    "rank": result.rank,
+                    "text": result.text[:200] if result.text else None,
+                    "cache_hit": result.cache_hit,
+                }
+                for result in response.results
+            ]
+        admin.requests.appendleft(record)
 
     @app.get("/health/live")
     async def live() -> dict[str, str]:
@@ -219,6 +239,7 @@ def create_app(settings: Settings | None = None, *, load_model: bool = True) -> 
         record_response(
             response,
             request.headers.get("x-correlation-id", str(response.request_id)),
+            request_body=body,
         )
         return response
 
@@ -229,8 +250,8 @@ def create_app(settings: Settings | None = None, *, load_model: bool = True) -> 
         started = time.perf_counter()
         responses = await asyncio.gather(*(service.rerank(item) for item in body.requests))
         correlation_id = request.headers.get("x-correlation-id", str(uuid4()))
-        for response in responses:
-            record_response(response, correlation_id)
+        for response, req_body in zip(responses, body.requests, strict=True):
+            record_response(response, correlation_id, request_body=req_body)
         return BatchResponse(
             responses=responses,
             total_pairs=sum(len(x.documents) for x in body.requests),
