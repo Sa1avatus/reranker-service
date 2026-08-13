@@ -21,7 +21,7 @@ cache degradation.
 - candidate model validation, warm-up, activation, and rollback controls;
 - Redis caching with SHA-256-only keys and inference-safe degradation;
 - a React administration console with playgrounds, benchmarks, metrics, runtime controls, and
-  technical request history;
+  technical request history with expandable per-request detail (query, scored results, documents);
 - versioned browser-local persistence for the single-request Playground's last query, ordered
   documents with metadata, and top-N; clearing is explicit and credentials are never included;
 - isolated ONNX GPU, ONNX CPU, exporter, legacy, Jina, and Alibaba Docker targets.
