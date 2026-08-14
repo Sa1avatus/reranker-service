@@ -681,7 +681,7 @@ function DashboardPanel({ token }: { token: string }) {
     <article><span>CPU</span><strong>{data.resources.cpu_percent}%</strong></article>
     <article><span>RAM</span><strong>{data.resources.ram_percent}%</strong></article>
   </div><h3>Last hour</h3><div className="metric-table">
-    {metrics.data?.points.length ? metrics.data.points.map((point) => {
+    {metrics.data?.points.length ? [...metrics.data.points].reverse().map((point) => {
       const expanded = expandedBucket === point.timestamp;
       const detailsId = `dashboard-bucket-${point.timestamp}`;
       return <React.Fragment key={point.timestamp}>
