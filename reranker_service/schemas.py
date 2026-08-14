@@ -1,7 +1,7 @@
 from typing import Any, Literal
 from uuid import UUID, uuid4
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from .revisions import validate_revision_reference
 
@@ -18,12 +18,26 @@ class RerankRequest(BaseModel):
     request_id: UUID = Field(default_factory=uuid4)
     query: str = Field(min_length=1)
     documents: list[Document] = Field(min_length=1)
-    top_n: int | None = Field(None, ge=1)
+    top_n: int | None = Field(
+        None,
+        ge=1,
+        validation_alias=AliasChoices("top_n", "top_k"),
+    )
     return_documents: bool = True
     truncate: bool = True
 
 
 class Result(BaseModel):
+    """A single reranked document result.
+
+    ``score`` is the raw semantic/cross-encoder relevance of the document to
+    the query.  ``normalized_score`` is an optional model-specific mapping of
+    ``score`` into [0, 1] (e.g. sigmoid for logit-based backends).  Neither
+    value indicates whether a requirement is satisfied, a candidate matches a
+    vacancy, or any other business-domain decision — that responsibility
+    belongs to the downstream Matching Engine.
+    """
+
     id: str
     score: float
     normalized_score: float | None = Field(default=None, ge=0, le=1)

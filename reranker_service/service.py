@@ -130,7 +130,7 @@ class RerankService:
                 ),
                 rank=rank,
                 text=p.document.text if request.return_documents else None,
-                metadata=p.document.metadata if request.return_documents else None,
+                metadata=p.document.metadata,
                 token_count=len(p.text.split()),
                 truncated=p.truncated,
                 cache_hit=i not in misses,

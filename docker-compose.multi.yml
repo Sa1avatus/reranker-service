@@ -1,0 +1,125 @@
+# Multiple reranker backends behind a single port (8200).
+#
+# Each backend has its own transformers version — they cannot coexist in one container.
+# Models are routed by X-Backend header (nginx map directive).
+#
+# Explicit single-GPU-backend startup:
+#   powershell -File scripts/select-backend.ps1 legacy
+#
+# Ports:
+#   :8200  proxy (routes to active backend)
+#   :8210  jina direct
+#   :8211  alibaba direct
+#   :8212  legacy direct
+#   :8400  web UI
+
+services:
+  reranker-redis:
+    image: redis:7.4.2-alpine3.21
+    command: ["redis-server","--appendonly","yes","--maxmemory","256mb","--maxmemory-policy","allkeys-lru"]
+    ports: ["127.0.0.1:57379:6379"]
+    volumes: ["redis-data:/data"]
+    healthcheck: {test: ["CMD","redis-cli","ping"], interval: 5s, timeout: 3s, retries: 10}
+    restart: unless-stopped
+    deploy: {resources: {limits: {memory: 384M, cpus: "1.0"}}}
+
+  reranker-api-jina:
+    profiles: [jina]
+    build: {context: ., target: runtime-jina}
+    gpus: all
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      RERANKER_BACKEND: jina_listwise
+      RERANKER_MODEL: jinaai/jina-reranker-v3
+      RERANKER_MODEL_REVISION: d7d7e73b6ea138ced340b83865931b5dfb6c97aa
+      RERANKER_MODEL_ALLOWLIST: jinaai/jina-reranker-v3
+      RERANKER_DEVICE: auto
+      RERANKER_PRECISION: fp16
+      RERANKER_TRUST_REMOTE_CODE: "true"
+      RERANKER_REMOTE_CODE_ALLOWLIST: jinaai/jina-reranker-v3
+      RERANKER_DYNAMIC_BATCHING: "false"
+      RERANKER_CACHE_ENABLED: "false"
+      RERANKER_REDIS_URL: redis://reranker-redis:6379/0
+      HF_HOME: /models/hf-cache
+    ports: ["127.0.0.1:8210:8200"]
+    volumes: ["jina-cache:/models/hf-cache"]
+    depends_on: {reranker-redis: {condition: service_healthy}}
+    healthcheck: {test: ["CMD","python","-c","import urllib.request; urllib.request.urlopen('http://localhost:8200/health/live')"], interval: 10s, timeout: 5s, retries: 20}
+    restart: unless-stopped
+    deploy: {resources: {limits: {memory: 6G, cpus: "4.0"}}}
+
+  reranker-api-alibaba:
+    profiles: [alibaba]
+    build: {context: ., target: runtime-alibaba}
+    gpus: all
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      RERANKER_BACKEND: alibaba_gte
+      RERANKER_MODEL: Alibaba-NLP/gte-multilingual-reranker-base
+      RERANKER_MODEL_REVISION: 8215cf04918ba6f7b6a62bb44238ce2953d8831c
+      RERANKER_MODEL_ALLOWLIST: Alibaba-NLP/gte-multilingual-reranker-base
+      RERANKER_DEVICE: auto
+      RERANKER_TRUST_REMOTE_CODE: "true"
+      RERANKER_REMOTE_CODE_ALLOWLIST: Alibaba-NLP/gte-multilingual-reranker-base
+      RERANKER_REMOTE_CODE_REVISION: 40ced75c3017eb27626c9d4ea981bde21a2662f4
+      RERANKER_REDIS_URL: redis://reranker-redis:6379/0
+      HF_HOME: /models/hf-cache
+    ports: ["127.0.0.1:8211:8200"]
+    volumes: ["alibaba-cache:/models/hf-cache"]
+    depends_on: {reranker-redis: {condition: service_healthy}}
+    healthcheck: {test: ["CMD","python","-c","import urllib.request; urllib.request.urlopen('http://localhost:8200/health/live')"], interval: 10s, timeout: 5s, retries: 20}
+    restart: unless-stopped
+    deploy: {resources: {limits: {memory: 6G, cpus: "4.0"}}}
+
+  reranker-api-legacy:
+    build: {context: ., target: runtime-legacy}
+    gpus: all
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      RERANKER_BACKEND: legacy_cross_encoder
+      RERANKER_MODEL: ${RERANKER_MODEL:-BAAI/bge-reranker-v2-m3}
+      RERANKER_MODEL_REVISION: ${RERANKER_MODEL_REVISION:-953dc6f6f85a1b2dbfca4c34a2796e7dde08d41e}
+      RERANKER_MODEL_ALLOWLIST: ${RERANKER_MODEL_ALLOWLIST:-BAAI/bge-reranker-v2-m3,cross-encoder/ms-marco-MiniLM-L6-v2,cross-encoder/ettin-reranker-32m-v1,cross-encoder/ettin-reranker-68m-v1,Qwen/Qwen3-Reranker-0.6B}
+      RERANKER_DEVICE: auto
+      RERANKER_TRUST_REMOTE_CODE: "true"
+      RERANKER_REMOTE_CODE_ALLOWLIST: ${RERANKER_REMOTE_CODE_ALLOWLIST:-Qwen/Qwen3-Reranker-0.6B}
+      RERANKER_REDIS_URL: redis://reranker-redis:6379/0
+      HF_HOME: /models/hf-cache
+    ports: ["127.0.0.1:8212:8200"]
+    volumes: ["legacy-cache:/models/hf-cache"]
+    depends_on: {reranker-redis: {condition: service_healthy}}
+    healthcheck: {test: ["CMD","python","-c","import urllib.request; urllib.request.urlopen('http://localhost:8200/health/live')"], interval: 10s, timeout: 5s, retries: 20}
+    restart: unless-stopped
+    deploy: {resources: {limits: {memory: 6G, cpus: "4.0"}}}
+
+  proxy:
+    image: nginx:1.27-alpine
+    ports: ["0.0.0.0:8200:8200"]
+    volumes:
+      - ./nginx-api-proxy.conf.template:/etc/nginx/templates/default.conf.template:ro
+    environment:
+      RERANKER_DEFAULT_BACKEND: ${RERANKER_DEFAULT_BACKEND:-legacy}
+      RERANKER_UPSTREAM: ${RERANKER_UPSTREAM:-reranker-api-legacy:8200}
+      RERANKER_MODEL_NAME: ${RERANKER_MODEL_NAME:-BAAI/bge-reranker-v2-m3}
+      RERANKER_BACKEND_KIND: ${RERANKER_BACKEND_KIND:-legacy_cross_encoder}
+    networks:
+      default:
+        aliases: [reranker-api]
+    depends_on: {reranker-redis: {condition: service_healthy}}
+    restart: unless-stopped
+    deploy: {resources: {limits: {memory: 64M, cpus: "0.25"}}}
+
+  reranker-web:
+    build: ./web
+    ports: ["0.0.0.0:8400:8400"]
+    depends_on: {proxy: {condition: service_started}}
+    restart: unless-stopped
+    deploy: {resources: {limits: {memory: 128M, cpus: "0.5"}}}
+
+volumes: {redis-data: {}, jina-cache: {}, alibaba-cache: {}, legacy-cache: {}}

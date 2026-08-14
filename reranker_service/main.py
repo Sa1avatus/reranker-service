@@ -11,6 +11,7 @@ from fastapi.responses import JSONResponse, Response
 from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
+from . import __version__
 from .admin import AdminState
 from .batching import DynamicBatcher
 from .benchmark import BenchmarkRunner
@@ -76,7 +77,7 @@ def create_app(settings: Settings | None = None, *, load_model: bool = True) -> 
 
     app = FastAPI(
         title="Reranker Service",
-        version="1.0.0",
+        version=__version__,
         lifespan=lifespan,
         docs_url=None,
         openapi_url=None,
@@ -84,6 +85,25 @@ def create_app(settings: Settings | None = None, *, load_model: bool = True) -> 
     )
     app.state.settings, app.state.runtime = cfg, runtime
     app.add_exception_handler(ServiceError, service_error_handler)  # type: ignore[arg-type]
+
+    @app.middleware("http")
+    async def validate_backend(request: Request, call_next):  # type: ignore[no-untyped-def]
+        selected_backend = request.headers.get("x-backend")
+        if (
+            request.url.path.startswith("/v1/")
+            and selected_backend
+            and selected_backend != cfg.backend
+        ):
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "error": {
+                        "code": "invalid_backend",
+                        "message": f"unknown or unavailable backend: {selected_backend}",
+                    }
+                },
+            )
+        return await call_next(request)
 
     @app.exception_handler(RequestValidationError)
     async def validation_handler(_: Request, exc: RequestValidationError) -> JSONResponse:
@@ -242,6 +262,27 @@ def create_app(settings: Settings | None = None, *, load_model: bool = True) -> 
             request_body=body,
         )
         return response
+
+    @app.get("/v1/backends")
+    async def backends() -> dict[str, object]:
+        """Describe the single backend owned by this API process.
+
+        Multi-backend deployments may replace this response at their routing proxy, but the
+        response shape and explicit default remain identical.
+        """
+        backend_id = cfg.backend
+        return {
+            "default_backend": backend_id,
+            "backends": [
+                {
+                    "id": backend_id,
+                    "name": cfg.model,
+                    "backend": cfg.backend,
+                    "available": runtime.ready,
+                }
+            ],
+            "model_map": {cfg.model: backend_id},
+        }
 
     @app.post("/v1/rerank/batch", response_model=BatchResponse, dependencies=service_deps)
     async def rerank_batch(body: BatchRequest, request: Request) -> BatchResponse:

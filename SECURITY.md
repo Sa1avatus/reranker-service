@@ -4,6 +4,10 @@ Supply service/admin secrets externally and keep them distinct. Authentication u
 
 Admin request records (in-memory deque, behind admin bearer auth) retain query text and document text alongside technical metadata for operational debugging. Query text is truncated to 500 characters and document text to 200 characters. This data is never written to application logs, external telemetry, or persistent storage; it exists only in the running container's memory and is evicted when the deque reaches its capacity or the container restarts.
 
+The Playground does not persist query or document text by default. A user may explicitly enable
+browser-local persistence; disabling it or clearing the Playground removes the stored working data.
+Credentials and response results are never included in that browser record.
+
 Place TLS and distributed rate limiting at the ingress for multi-replica production. Rotate secrets, restrict health endpoints at the network boundary as appropriate, scan images/dependencies in CI, and review model artifacts before allowlisting. `/metrics` requires the service bearer token; only liveness and readiness are anonymous. In-process rate limiting is intentionally per replica.
 
 ONNX runtime never executes Hub downloads or exporter code. The separate exporter enforces the repository allowlist, resolves the requested revision to a full 40-character commit SHA, and uses `trust_remote_code=False`. Runtime artifact paths are derived from safe encoded identities; manifests reject traversal, unknown fields or versions, identity mismatches, missing files, escaping symlinks, and checksum mismatches. Artifact manifests and provider telemetry never contain bearer tokens, authorization headers, prompts, or document text.

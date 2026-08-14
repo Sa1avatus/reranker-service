@@ -2,6 +2,21 @@
 
 `reranker-web → reranker-api → RerankService → ModelRuntime → BackendRegistry`. The web container only reverse-proxies HTTP; it has no Redis or model-cache access. FastAPI owns validation, authentication, rate limits and response contracts. `RerankService` orchestrates per-pair cache lookup, one bounded runtime and stable sorting. `ModelRuntime` owns lifecycle, provider-aware concurrency, candidate activation and rollback; the selected backend owns framework-specific load, warm-up, rerank and unload behavior. The production default is `onnx_pairwise` with CUDA-first provider selection; `legacy_cross_encoder` remains an isolated parity/rollback target. Redis is never a readiness dependency.
 
+## Scope
+
+The reranker is a **pure relevance ranking service**. It ranks candidate evidence
+by semantic relevance to a query (atomic claim). It does not calculate match
+scores, decide requirement satisfaction, apply business penalties, or produce
+final match percentages. All business-domain decisions belong to the downstream
+Matching Engine in `job-searching-assistant`.
+
+`score` is a raw semantic/cross-encoder relevance value. `normalized_score` is an
+optional model-specific mapping into [0, 1] (e.g. sigmoid for logit-based
+backends, linear for cosine-similarity backends). Neither value represents match
+probability, requirement coverage, or candidate suitability.
+
+## Score semantics
+
 Public `score` values are raw model logits and are not comparable across model versions. A backend may additionally return `normalized_score` only when its model-specific transform is declared. Cache keys contain only SHA-256 over immutable model revision, backend, precision, normalized texts, and relevant inference configuration. Request text is neither logged nor retained. Runtime modifications are audited; changes that affect loaded model memory are reported as restart-required.
 
 Pairwise backends use per-pair caching and may use cross-request micro-batching. The

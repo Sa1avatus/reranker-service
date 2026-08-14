@@ -1,6 +1,6 @@
 [project]
 name = "reranker-service"
-version = "0.1.0"
+version = "0.5.0"
 description = "Production-oriented cross-encoder reranking service"
 requires-python = ">=3.12,<3.13"
 dependencies = [

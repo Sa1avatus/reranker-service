@@ -9,22 +9,57 @@ Reranker Service — независимый сервис cross-encoder ранж�
 Redis, ограниченный динамический batching, пакетные запросы, наблюдаемость через
 Prometheus/OpenTelemetry и безопасная деградация кеша.
 
+Репозиторий активно развивается и пока не содержит формальных release tags. В
+[CHANGELOG.ru.md](CHANGELOG.ru.md) перечислены восстановленные по Git-истории этапы разработки и
+текущие незарелизенные изменения.
+
 ## Возможности
 
 - защищённые API одиночного и пакетного ранжирования;
 - стабильное ранжирование с сохранением исходного порядка при равных оценках;
 - одна неизменяемая ревизия и один активный runtime модели в контейнере;
-- registry backend-реализаций и типизированные pairwise-capabilities существующего CrossEncoder;
+- registry backend-реализаций с типизированными capabilities для ONNX, legacy CrossEncoder,
+  Alibaba GTE pairwise и Jina listwise;
+- versioned ONNX manifests с SHA-256-проверкой, привязанные к модели, полному SHA ревизии, backend и
+  precision;
 - проверка, прогрев, активация и откат модели-кандидата;
 - Redis-кеш с ключами только на основе SHA-256 и деградацией без остановки инференса;
 - административная React-консоль с playground, бенчмарками, метриками, runtime-настройками и
   технической историей запросов с раскрывающимися деталями (query, результаты ранжирования, документы);
-- версионированное локальное хранение в браузере последнего query, упорядоченных документов с
-  metadata и top-N одиночного Playground; очистка выполняется явно, credentials не сохраняются;
-- CPU- и CUDA-варианты Docker-образа и воспроизводимый PowerShell-установщик.
+- локальное хранение в браузере данных Playground и Batch Playground (query, документы, metadata,
+  top-N); включено по умолчанию, можно отключить чекбоксом «Remember inputs in this browser»;
+- изолированные ONNX GPU, ONNX CPU, exporter, legacy, Jina и Alibaba Docker targets;
+- воспроизводимый PowerShell-установщик.
 
-API доступен по адресу `http://localhost:8200`, административная консоль —
-`http://localhost:8400`.
+Локально API доступен по адресу `http://localhost:8200`, а из доверенной локальной сети — по адресу
+`http://192.168.1.93:8200`. Административная консоль доступна по адресам
+`http://localhost:8400` и `http://192.168.1.93:8400` соответственно. Для обоих интерфейсов нужны
+настроенные bearer credentials. Redis и диагностические порты multi-backend остаются привязаны к
+loopback.
+
+## Область ответственности
+
+Реранкер — это **чистый сервис ранжирования по релевантности**. Он отвечает на один вопрос:
+
+> Насколько данный фрагмент evidence релевантен конкретному atomic claim?
+
+Реранкер **НЕ**:
+- рассчитывает итоговый match score вакансии;
+- решает, выполнено ли требование (SUPPORTED / PARTIAL / UNKNOWN / CONTRADICTED);
+- проверяет длительность опыта;
+- применяет mandatory/blocker penalties;
+- определяет commercial/production experience;
+- рассчитывает итоговый процент 0–100%;
+- знает веса требований вакансии.
+
+Эти функции принадлежат **Matching Engine** в составе downstream-сервиса
+`job-searching-assistant`.
+
+`score` означает **семантическую/cross-encoder релевантность evidence к query**.
+Это не match probability, не requirement coverage и не candidate score.
+`normalized_score` — опциональная model-specific маппинг `score` в [0, 1]
+(например, sigmoid для logit-based backend). API также принимает `top_k` как
+backward-compatible алиас для `top_n`.
 
 ## Архитектура
 
@@ -42,8 +77,11 @@ flowchart LR
     Service <--> Redis[("Redis-кеш оценок")]
     Service --> Batcher["DynamicBatcher"]
     Batcher --> Runtime["Единственный ModelRuntime"]
-    Runtime --> Model["Зафиксированный BGE CrossEncoder"]
-    ModelCache[("Docker volume кеша модели")] --> Runtime
+    Runtime --> Registry["Registry backend-реализаций"]
+    Registry --> Legacy["Legacy CrossEncoder"]
+    Registry --> ONNX["ONNX pairwise"]
+    ONNX --> Providers["CUDA EP с CPU EP fallback"]
+    Artifacts[("Проверенный artifact volume")] --> ONNX
     API --> Metrics["Prometheus / OpenTelemetry"]
 ```
 
@@ -51,7 +89,8 @@ Web-контейнер только раздаёт консоль и прокс�
 валидацию, лимиты, стабильные контракты ответов и технический аудит. `RerankService` координирует
 поиск в хешированном кеше и ограниченный инференс. `DynamicBatcher` объединяет пары, не смешивая
 идентичность запросов, а `ModelRuntime` владеет единственным активным CrossEncoder и executor.
-Сбой Redis уменьшает эффективность кеша, но не нарушает инференс или readiness.
+Framework-specific загрузка, прогрев, проверка provider, rerank и выгрузка остаются внутри каждого
+backend. Сбой Redis уменьшает эффективность кеша, но не нарушает инференс или readiness.
 
 ## Установка с нуля в Windows
 
@@ -129,23 +168,8 @@ python -m venv .venv
 .\.venv\Scripts\python.exe -m pytest
 ```
 
-Для консоли нужен Node.js 22. Из каталога `web/` выполните `npm install`, `npm test` и
-`npm run build`.
-
-## Эксплуатация и безопасность
-
-- Один API worker выбран намеренно: несколько worker дублируют модель в памяти.
-- CPU-инференсу обычно нужно 2–6 ГиБ в зависимости от длины последовательностей, batch и
-  concurrency.
-- CUDA дополнительно требует память под веса, активации и allocator. При OOM уменьшайте max length,
-  batch size или concurrency.
-- Входной текст, bearer credentials и нехешированные входы кеша не логируются и не сохраняются.
-- `score` содержит raw logit модели. `normalized_score` возвращается только при явно заданной
-  model-specific нормализации; оценки нельзя сравнивать между ревизиями.
-
-См. [API.md](API.md), [ARCHITECTURE.md](ARCHITECTURE.md),
-[OPERATIONS.md](OPERATIONS.md), [DEVELOPMENT.md](DEVELOPMENT.md) и
-[SECURITY.md](SECURITY.md). Измеренные результаты сохранены в [BENCHMARKS.md](BENCHMARKS.md).
+Для консоли нужны Node.js 22 и pnpm. Из каталога `web/` выполните `corepack enable`,
+`pnpm install --frozen-lockfile`, `pnpm test` и `pnpm run build`.
 
 ## ONNX artifact и GPU-контур
 
@@ -187,3 +211,45 @@ CC-BY-NC-4.0, поэтому перед использованием нужна 
 вторичного репозитория `Alibaba-NLP/new-impl`; logit нормализуется sigmoid. Qwen3 Reranker, Ettin и
 MiniLM проверены в отдельном `runtime-legacy`. Эти runtime не входят в ONNX production image по
 умолчанию.
+
+## Multi-backend стек для разработки
+
+`docker-compose.multi.yml` содержит отдельные определения Jina, Alibaba и legacy CrossEncoder,
+потому что их версии зависимостей нельзя безопасно объединить в одном runtime image. Одновременно
+запускается только один backend, поэтому память GPU может занимать только одна модель. Nginx proxy
+публикует выбранный backend по адресу `http://localhost:8200`:
+
+| Выбор | Backend | Прямой диагностический порт |
+| --- | --- | ---: |
+| `jina` | `jina_listwise` | `8210` |
+| `alibaba` | `alibaba_gte` | `8211` |
+| `legacy` | `legacy_cross_encoder` | `8212` |
+
+```powershell
+./scripts/select-backend.ps1 legacy  # или jina / alibaba
+Invoke-RestMethod http://localhost:8200/v1/backends
+```
+
+Selector сначала останавливает все три model services, а затем запускает выбранный. Поэтому смена
+выбора в UI не может оставить другую модель в GPU. Переключение backend намеренно выполняется при
+старте, а не через `X-Backend` для каждого запроса. Стек может исполнять явно разрешённый remote
+model code, поэтому используйте его только на доверенном хосте.
+
+## Эксплуатация и безопасность
+
+- Один API worker выбран намеренно: дополнительные workers дублируют модель в памяти.
+- CPU inference обычно требует 2–6 ГиБ в зависимости от длины, batch и concurrency.
+- CUDA дополнительно требует память под веса, activations и allocator headroom. При OOM сначала
+  уменьшайте max length, затем batch size или concurrency.
+- Тексты запросов, bearer credentials и нехешированные входы кеша не записываются в application
+  logs. Ограниченные previews в admin history живут только в памяти процесса. Сохранение данных
+  Playground и Batch Playground в браузере включено по умолчанию и может быть отключено чекбоксом.
+- `score` использует семантику конкретного backend: pairwise logit для стандартных backend и cosine
+  similarity для Jina listwise. `normalized_score` заполняется только при наличии обоснованной
+  model-specific нормализации; оценки разных моделей и ревизий напрямую несопоставимы.
+
+См. [API.md](API.md), [ARCHITECTURE.md](ARCHITECTURE.md),
+[OPERATIONS.md](OPERATIONS.md), [DEVELOPMENT.md](DEVELOPMENT.md) и
+[SECURITY.md](SECURITY.md). Воспроизводимые измерения приведены в
+[BENCHMARKS.md](BENCHMARKS.md), история изменений — в
+[CHANGELOG.ru.md](CHANGELOG.ru.md).

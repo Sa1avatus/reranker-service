@@ -1,6 +1,6 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
   App,
@@ -8,8 +8,41 @@ import {
   Login,
   parseDocuments,
   PLAYGROUND_STORAGE_KEY,
+  PLAYGROUND_REMEMBER_KEY,
+  resolveBackendSelection,
   savePlaygroundState,
 } from './main';
+
+describe('backend selection', () => {
+  const registry = {
+    default_backend: 'legacy',
+    backends: [
+      { id: 'jina', name: 'Jina', backend: 'jina_listwise', available: true },
+      { id: 'legacy', name: 'Legacy', backend: 'legacy_cross_encoder', available: true },
+      { id: 'down', name: 'Down', backend: 'onnx_pairwise', available: false },
+    ],
+    model_map: {},
+  };
+
+  it('uses the server default when there is no valid saved selection', () => {
+    expect(resolveBackendSelection('', registry)).toBe('legacy');
+    expect(resolveBackendSelection('unknown', registry)).toBe('legacy');
+    expect(resolveBackendSelection('down', registry)).toBe('legacy');
+  });
+
+  it('preserves an explicitly saved available backend', () => {
+    expect(resolveBackendSelection('jina', registry)).toBe('jina');
+  });
+
+  it('falls back to the first available backend or no header', () => {
+    expect(resolveBackendSelection('', { ...registry, default_backend: 'missing' })).toBe('jina');
+    expect(resolveBackendSelection('', {
+      ...registry,
+      default_backend: 'down',
+      backends: registry.backends.map((backend) => ({ ...backend, available: false })),
+    })).toBe('');
+  });
+});
 
 describe('document imports', () => {
   it('preserves JSON document IDs and metadata', () => {
@@ -53,6 +86,8 @@ describe('authentication', () => {
 });
 
 describe('Rerank Playground persistence', () => {
+  beforeEach(() => localStorage.setItem(PLAYGROUND_REMEMBER_KEY, 'true'));
+
   const renderApp = () => render(
     <QueryClientProvider client={new QueryClient()}><App /></QueryClientProvider>,
   );
@@ -172,6 +207,23 @@ describe('Rerank Playground persistence', () => {
     vi.unstubAllGlobals();
   });
 
+  it('restores inputs by default when remember key is absent', () => {
+    localStorage.setItem(PLAYGROUND_STORAGE_KEY, JSON.stringify({
+      version: 1, query: 'private', documents: [], top_n: 10,
+    }));
+    localStorage.removeItem(PLAYGROUND_REMEMBER_KEY);
+    expect(loadPlaygroundState().query).toBe('private');
+  });
+
+  it('does not restore or retain inputs when explicitly opted out', () => {
+    localStorage.setItem(PLAYGROUND_STORAGE_KEY, JSON.stringify({
+      version: 1, query: 'private', documents: [], top_n: 10,
+    }));
+    localStorage.setItem(PLAYGROUND_REMEMBER_KEY, 'false');
+    expect(loadPlaygroundState().query).not.toBe('private');
+    expect(localStorage.getItem(PLAYGROUND_STORAGE_KEY)).toBeNull();
+  });
+
   it('serializes only allowlisted Playground fields and never secrets', () => {
     const stateWithSecrets = {
       query: 'Safe query', documents: [{ id: 'doc-1', text: 'Safe text', metadata: {} }], top_n: 1,
@@ -262,6 +314,9 @@ describe('administrative controls', () => {
     render(<QueryClientProvider client={new QueryClient()}><App /></QueryClientProvider>);
     fireEvent.click(screen.getByRole('button', { name: 'Models' }));
     await screen.findByDisplayValue('BAAI/bge-reranker-v2-m3');
+    expect(screen.getByText('Used by console requests now:').parentElement?.textContent)
+      .toContain('BAAI/bge-reranker-v2-m3');
+    expect(screen.getByText('● Used now · ready')).toBeTruthy();
     fireEvent.change(screen.getByLabelText('Immutable revision'), { target: { value: 'abcdef1' } });
     fireEvent.click(screen.getByRole('button', { name: 'Check' }));
     await screen.findByText('Candidate is valid.');
@@ -289,6 +344,51 @@ describe('administrative controls', () => {
     await screen.findByText('test-model');
     expect(screen.getByText('8ms')).toBeTruthy();
     expect(screen.queryByText('private document')).toBeNull();
+    vi.unstubAllGlobals();
+  });
+
+  it('expands a dashboard minute into requests and their payload details', async () => {
+    sessionStorage.setItem('adminToken', 'admin-secret');
+    location.hash = 'Dashboard';
+    const request = {
+      request_id: 'request-dashboard', correlation_id: 'correlation-dashboard',
+      timestamp: 620, documents_count: 1, model: 'test-model', device: 'cpu',
+      latency_ms: 8, cache_hits: 0, status: 'success', truncation_count: 0,
+    };
+    const fetchMock = vi.fn().mockImplementation(async (url: string) => {
+      if (url.endsWith('/admin/dashboard')) return { ok: true, json: async () => ({
+        model: { name: 'test-model', revision: 'revision', ready: true, device: 'cpu',
+          backend: { backend: 'legacy_cross_encoder' } },
+        redis: { available: true },
+        resources: { cpu_percent: 5, ram_percent: 47, uptime_seconds: 60 },
+      }) };
+      if (url.includes('/admin/metrics/timeseries')) return { ok: true, json: async () => ({
+        points: [{ timestamp: 600, requests: 1, latency_p95_ms: 8, cache_hits: 0 }],
+      }) };
+      if (url.endsWith('/admin/requests/request-dashboard')) return { ok: true, json: async () => ({
+        ...request,
+        query: 'Incoming dashboard query',
+        documents: [{ id: 'document-1', text: 'Incoming document text' }],
+        results: [{ id: 'document-1', score: 2.4, normalized_score: 0.91, rank: 1,
+          text: 'Outgoing ranked document', cache_hit: false }],
+      }) };
+      if (url.includes('/admin/requests?page=1&size=100')) return { ok: true, json: async () => ({
+        total: 1, size: 100, items: [request],
+      }) };
+      return { ok: true, json: async () => ({}) };
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    render(<QueryClientProvider client={new QueryClient()}><App /></QueryClientProvider>);
+
+    fireEvent.click(await screen.findByRole('button', { name: /1 requests/ }));
+    await screen.findByText('test-model');
+    fireEvent.click(screen.getByRole('button', {
+      name: 'Show details for request request-dashboard',
+    }));
+
+    expect(await screen.findByText('Incoming dashboard query')).toBeTruthy();
+    expect(screen.getByText('Incoming document text')).toBeTruthy();
+    expect(screen.getByText('Outgoing ranked document')).toBeTruthy();
     vi.unstubAllGlobals();
   });
 

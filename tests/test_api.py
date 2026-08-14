@@ -1,9 +1,44 @@
+from reranker_service import __version__
+
+
 def test_liveness_and_readiness(client):
     assert client.get("/health/live").status_code == 200
     response = client.get("/health/ready")
     assert response.status_code == 200
     assert response.json()["backend"]["backend"] == "legacy_cross_encoder"
     assert response.json()["degraded"] is False
+
+
+def test_application_version_is_single_source(client):
+    assert client.app.version == __version__ == "0.5.0"
+
+
+def test_single_backend_discovery_is_explicit_and_public(client, settings):
+    response = client.get("/v1/backends")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "default_backend": "legacy_cross_encoder",
+        "backends": [
+            {
+                "id": "legacy_cross_encoder",
+                "name": settings.model,
+                "backend": "legacy_cross_encoder",
+                "available": True,
+            }
+        ],
+        "model_map": {settings.model: "legacy_cross_encoder"},
+    }
+
+
+def test_unknown_backend_header_is_rejected(client, auth):
+    response = client.post(
+        "/v1/rerank",
+        headers={**auth, "X-Backend": "unknown"},
+        json={"query": "q", "documents": [{"id": "1", "text": "d"}]},
+    )
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "invalid_backend"
 
 
 def test_authentication(client, payload):
@@ -79,7 +114,13 @@ def test_openapi_contract(client):
     assert client.get("/docs").status_code == 404
     assert client.get("/openapi.json").status_code == 404
     paths = client.app.openapi()["paths"]
-    for path in ["/v1/rerank", "/v1/rerank/batch", "/v1/models/current", "/metrics"]:
+    for path in [
+        "/v1/backends",
+        "/v1/rerank",
+        "/v1/rerank/batch",
+        "/v1/models/current",
+        "/metrics",
+    ]:
         assert path in paths
 
 

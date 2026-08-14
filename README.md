@@ -9,6 +9,10 @@ production path is ONNX Runtime with CUDA and controlled CPU fallback. It suppor
 bounded dynamic batching, batch requests, Prometheus/OpenTelemetry observability, and graceful
 cache degradation.
 
+The repository is under active development and does not yet contain formal release tags. See
+[CHANGELOG.md](CHANGELOG.md) for the reconstructed development milestones and current unreleased
+changes.
+
 ## What is included
 
 - authenticated single-request and batch reranking APIs;
@@ -22,12 +26,38 @@ cache degradation.
 - Redis caching with SHA-256-only keys and inference-safe degradation;
 - a React administration console with playgrounds, benchmarks, metrics, runtime controls, and
   technical request history with expandable per-request detail (query, scored results, documents);
-- versioned browser-local persistence for the single-request Playground's last query, ordered
-  documents with metadata, and top-N; clearing is explicit and credentials are never included;
+- browser-local persistence for Playground and Batch Playground inputs (query, documents, metadata,
+  top-N); enabled by default, users can opt out via "Remember inputs in this browser" checkbox;
 - isolated ONNX GPU, ONNX CPU, exporter, legacy, Jina, and Alibaba Docker targets.
 
-The API is available at `http://localhost:8200`; the administration console is at
-`http://localhost:8400`.
+The API is available at `http://localhost:8200` locally and `http://192.168.1.93:8200` from the
+trusted LAN. The administration console is at `http://localhost:8400` locally and
+`http://192.168.1.93:8400` on the LAN. Both require their configured bearer credentials. Redis and
+the multi-backend diagnostic ports remain bound to loopback.
+
+## Scope and responsibility
+
+The reranker is a **pure relevance ranking service**. It answers one question:
+
+> How relevant is this evidence fragment to the given atomic claim?
+
+The reranker **does not**:
+- calculate match scores between candidates and vacancies;
+- decide whether a requirement is satisfied (SUPPORTED / PARTIAL / UNKNOWN / CONTRADICTED);
+- check experience duration;
+- apply mandatory/blocker penalties;
+- determine commercial vs. production experience;
+- produce a final percentage (0–100%);
+- know requirement weights.
+
+These responsibilities belong to the **Matching Engine** in the downstream
+`job-searching-assistant` service.
+
+`score` means **semantic/cross-encoder relevance of the evidence to the query**.
+It is not a match probability, requirement coverage, or candidate score.
+`normalized_score` is an optional model-specific mapping of `score` into [0, 1]
+(e.g. sigmoid for logit-based backends).  The API also accepts `top_k` as a
+backward-compatible alias for `top_n`.
 
 ## Architecture
 
@@ -137,7 +167,8 @@ python -m venv .venv
 .\.venv\Scripts\python.exe -m pytest
 ```
 
-The console uses Node.js 22. Run `npm install`, `npm test`, and `npm run build` from `web/`.
+The console uses Node.js 22 and pnpm. Run `corepack enable`, `pnpm install --frozen-lockfile`,
+`pnpm test`, and `pnpm run build` from `web/`.
 
 ## ONNX artifact and GPU workflow
 
@@ -195,13 +226,38 @@ normalized with sigmoid. Qwen3 Reranker, Ettin, and MiniLM remain supported by t
 `runtime-legacy` compatibility target. Review every model's license before deployment; Jina v3 is
 CC-BY-NC-4.0 and is not suitable for unreviewed commercial use.
 
+## Multi-backend development stack
+
+`docker-compose.multi.yml` contains separate Jina, Alibaba, and legacy CrossEncoder definitions
+because their dependency versions cannot safely share one runtime image. Only one backend is
+started at a time and therefore only one model may own GPU memory. An Nginx proxy publishes the
+selected backend at `http://localhost:8200`:
+
+| Selection | Backend | Direct diagnostic port |
+| --- | --- | ---: |
+| `jina` | `jina_listwise` | `8210` |
+| `alibaba` | `alibaba_gte` | `8211` |
+| `legacy` | `legacy_cross_encoder` | `8212` |
+
+```powershell
+./scripts/select-backend.ps1 legacy  # or jina / alibaba
+Invoke-RestMethod http://localhost:8200/v1/backends
+```
+
+The selector stops all three model services before starting the requested one, so changing the UI
+selection cannot leave another model resident on the GPU. Backend switching is deliberately a
+startup operation, not a per-request `X-Backend` choice. The stack may execute explicitly
+allowlisted remote model code; keep it on a trusted host.
+
 ## Operations and safety
 
 - One API worker is deliberate: multiple workers duplicate model memory.
 - CPU inference generally needs 2–6 GiB depending on sequence, batch, and concurrency settings.
 - CUDA additionally needs weights, activations, and allocator headroom. Reduce max length, batch
   size, or concurrency on OOM.
-- Input text, bearer credentials, and unhashed cache inputs are never logged or persisted.
+- Input text, bearer credentials, and unhashed cache inputs are not written to application logs.
+  Bounded admin-history previews live only in process memory. Playground browser persistence is
+  enabled by default and can be disabled per-user via the checkbox.
 - `score` uses backend-declared semantics (a pairwise logit for the standard backends, cosine
   similarity for Jina listwise). `normalized_score` is populated only when the backend declares a
   valid model-specific transform; scores are not comparable across models or revisions.
@@ -209,4 +265,5 @@ CC-BY-NC-4.0 and is not suitable for unreviewed commercial use.
 See [API.md](API.md), [ARCHITECTURE.md](ARCHITECTURE.md),
 [OPERATIONS.md](OPERATIONS.md), [DEVELOPMENT.md](DEVELOPMENT.md), and
 [SECURITY.md](SECURITY.md). Reproducible measured results are recorded in
-[BENCHMARKS.md](BENCHMARKS.md).
+[BENCHMARKS.md](BENCHMARKS.md), and release history is maintained in
+[CHANGELOG.md](CHANGELOG.md).

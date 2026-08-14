@@ -1,0 +1,17 @@
+{
+  "source": "saved",
+  "recipe": {
+    "name": "Reranker Service (project venv)",
+    "kind": "fastapi",
+    "bootstrap": [],
+    "build": [],
+    "test": [
+      "bash -c \"PYTHONPATH='' D:/OpenAIProjects/reranker-service/.venv/Scripts/python.exe -m pytest tests/test_api.py tests/test_admin.py tests/test_config.py tests/test_parity.py tests/test_exporter.py tests/test_artifacts.py tests/test_evidence_reranking.py -q --tb=short --no-cov\""
+    ],
+    "lint": [
+      "D:/Python312/Scripts/ruff.exe check reranker_service/ tests/",
+      "bash -c \"PYTHONPATH='' D:/Python312/Scripts/mypy.exe reranker_service/\""
+    ],
+    "evidence": ["Uses project .venv (Python 3.12) for test execution"]
+  }
+}

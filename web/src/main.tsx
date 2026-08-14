@@ -92,6 +92,7 @@ export function Login({ onLogin }: { onLogin: (token: string) => void }) {
 type PlaygroundDocument = { id: string; text: string; metadata: Record<string, unknown> };
 
 export const PLAYGROUND_STORAGE_KEY = 'reranker.playground.v1';
+export const PLAYGROUND_REMEMBER_KEY = 'reranker.playground.remember';
 const PLAYGROUND_STORAGE_VERSION = 1;
 const PLAYGROUND_SAVE_DELAY_MS = 250;
 
@@ -118,6 +119,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 export function loadPlaygroundState(): PlaygroundState {
   try {
+    if (localStorage.getItem(PLAYGROUND_REMEMBER_KEY) === 'false') {
+      localStorage.removeItem(PLAYGROUND_STORAGE_KEY);
+      return defaultPlaygroundState();
+    }
     const raw = localStorage.getItem(PLAYGROUND_STORAGE_KEY);
     if (!raw) return defaultPlaygroundState();
     const value: unknown = JSON.parse(raw);
@@ -227,6 +232,9 @@ export function parseDocuments(filename: string, content: string): PlaygroundDoc
 
 function Playground({ token }: { token: string }) {
   const [initialState] = useState(loadPlaygroundState);
+  const [rememberInputs, setRememberInputs] = useState(() => {
+    try { return localStorage.getItem(PLAYGROUND_REMEMBER_KEY) !== 'false'; } catch { return true; }
+  });
   const [query, setQuery] = useState(initialState.query);
   const [documents, setDocuments] = useState<PlaygroundDocument[]>(initialState.documents);
   const [topN, setTopN] = useState(initialState.top_n); const [importError, setImportError] = useState('');
@@ -236,11 +244,15 @@ function Playground({ token }: { token: string }) {
       return_documents: true, truncate: true }),
   }) });
   useEffect(() => {
+    if (!rememberInputs) {
+      try { localStorage.removeItem(PLAYGROUND_STORAGE_KEY); } catch { /* Storage is optional. */ }
+      return undefined;
+    }
     const timeout = window.setTimeout(() => {
       savePlaygroundState({ query, documents, top_n: topN });
     }, PLAYGROUND_SAVE_DELAY_MS);
     return () => window.clearTimeout(timeout);
-  }, [query, documents, topN]);
+  }, [query, documents, topN, rememberInputs]);
   const move = (from: number, to: number) => {
     if (to < 0 || to >= documents.length || from === to) return;
     const reordered = [...documents]; const [document] = reordered.splice(from, 1);
@@ -276,6 +288,17 @@ function Playground({ token }: { token: string }) {
       <label>Top N<input aria-label="Top N" type="number" min="1" max="100" value={topN}
         onChange={(event) => setTopN(Number(event.target.value))} /></label>
       <button onClick={() => mutation.mutate()} disabled={mutation.isPending}>Run rerank</button>
+      <label><input aria-label="Remember Playground inputs" type="checkbox" checked={rememberInputs}
+        onChange={(event) => {
+          const remember = event.target.checked; setRememberInputs(remember);
+          try {
+            if (remember) localStorage.setItem(PLAYGROUND_REMEMBER_KEY, 'true');
+            else {
+              localStorage.removeItem(PLAYGROUND_REMEMBER_KEY);
+              localStorage.removeItem(PLAYGROUND_STORAGE_KEY);
+            }
+          } catch { /* Storage is optional. */ }
+        }} />Remember inputs in this browser</label>
       <button className="danger" onClick={() => {
         mutation.reset(); setQuery(''); setDocuments([]); setTopN(10); setImportError(''); setDragged(null);
         try { localStorage.removeItem(PLAYGROUND_STORAGE_KEY); } catch { /* Keep the UI clear. */ }
@@ -287,12 +310,43 @@ function Playground({ token }: { token: string }) {
 
 type BatchItem = { key: number; query: string; documents: string; topN: number };
 
+const BATCH_STORAGE_KEY = 'reranker.batch.v1';
+
+function loadBatchState(): { items: BatchItem[]; nextKey: number } {
+  try {
+    if (localStorage.getItem(PLAYGROUND_REMEMBER_KEY) === 'false') {
+      localStorage.removeItem(BATCH_STORAGE_KEY);
+      return { items: [{ key: 1, query: 'Kubernetes experience', documents: 'Production Kubernetes operations\nMicrosoft SQL Server administration', topN: 2 }], nextKey: 2 };
+    }
+    const raw = localStorage.getItem(BATCH_STORAGE_KEY);
+    if (!raw) return { items: [{ key: 1, query: 'Kubernetes experience', documents: 'Production Kubernetes operations\nMicrosoft SQL Server administration', topN: 2 }], nextKey: 2 };
+    const value: unknown = JSON.parse(raw);
+    if (!isRecord(value) || !Array.isArray(value.items)) return { items: [{ key: 1, query: 'Kubernetes experience', documents: 'Production Kubernetes operations\nMicrosoft SQL Server administration', topN: 2 }], nextKey: 2 };
+    const items = value.items.map((item: unknown): BatchItem | null => {
+      if (!isRecord(item) || typeof item.key !== 'number' || typeof item.query !== 'string' ||
+          typeof item.documents !== 'string' || typeof item.topN !== 'number') return null;
+      return { key: item.key, query: item.query, documents: item.documents, topN: item.topN };
+    });
+    if (items.some((item: BatchItem | null) => item === null) || items.length > 32) {
+      return { items: [{ key: 1, query: 'Kubernetes experience', documents: 'Production Kubernetes operations\nMicrosoft SQL Server administration', topN: 2 }], nextKey: 2 };
+    }
+    const nextKey = typeof value.nextKey === 'number' ? value.nextKey : items.length + 1;
+    return { items: items as BatchItem[], nextKey };
+  } catch {
+    return { items: [{ key: 1, query: 'Kubernetes experience', documents: 'Production Kubernetes operations\nMicrosoft SQL Server administration', topN: 2 }], nextKey: 2 };
+  }
+}
+
+function saveBatchState(items: BatchItem[], nextKey: number): void {
+  try {
+    localStorage.setItem(BATCH_STORAGE_KEY, JSON.stringify({ items, nextKey, version: 1 }));
+  } catch { /* Storage is optional. */ }
+}
+
 function BatchPlayground({ token }: { token: string }) {
-  const [nextKey, setNextKey] = useState(2);
-  const [items, setItems] = useState<BatchItem[]>([{
-    key: 1, query: 'Kubernetes experience',
-    documents: 'Production Kubernetes operations\nMicrosoft SQL Server administration', topN: 2,
-  }]);
+  const initial = loadBatchState();
+  const [nextKey, setNextKey] = useState(initial.nextKey);
+  const [items, setItems] = useState<BatchItem[]>(initial.items);
   const mutation = useMutation({ mutationFn: () => api<Record<string, unknown>>(
     'admin/rerank/batch', token, { method: 'POST', body: JSON.stringify({ requests: items.map((item) => ({
       query: item.query,
@@ -302,6 +356,17 @@ function BatchPlayground({ token }: { token: string }) {
       top_n: item.topN, return_documents: true, truncate: true,
     })) }) },
   ) });
+  const [rememberInputs, setRememberInputs] = useState(() => {
+    try { return localStorage.getItem(PLAYGROUND_REMEMBER_KEY) !== 'false'; } catch { return true; }
+  });
+  useEffect(() => {
+    if (!rememberInputs) {
+      try { localStorage.removeItem(BATCH_STORAGE_KEY); } catch { /* Storage is optional. */ }
+      return undefined;
+    }
+    const timeout = window.setTimeout(() => { saveBatchState(items, nextKey); }, PLAYGROUND_SAVE_DELAY_MS);
+    return () => window.clearTimeout(timeout);
+  }, [items, nextKey, rememberInputs]);
   const update = (key: number, patch: Partial<BatchItem>) => setItems(
     items.map((item) => item.key === key ? { ...item, ...patch } : item),
   );
@@ -332,7 +397,20 @@ function BatchPlayground({ token }: { token: string }) {
           value={item.topN} onChange={(event) => update(item.key, { topN: Number(event.target.value) })} /></label>
       </article>)}</div><div className="actions"><button onClick={() => mutation.mutate()}
         disabled={mutation.isPending || totalPairs === 0}>Run batch</button>
-      <button className="secondary" disabled={!mutation.data} onClick={exportResult}>Export JSON</button></div>
+      <button className="secondary" disabled={!mutation.data} onClick={exportResult}>Export JSON</button>
+      <label><input aria-label="Remember Batch Playground inputs" type="checkbox" checked={rememberInputs}
+        onChange={(event) => {
+          const remember = event.target.checked; setRememberInputs(remember);
+          try {
+            if (remember) localStorage.setItem(PLAYGROUND_REMEMBER_KEY, 'true');
+            else {
+              localStorage.removeItem(PLAYGROUND_REMEMBER_KEY);
+              localStorage.removeItem(BATCH_STORAGE_KEY);
+              localStorage.removeItem(PLAYGROUND_STORAGE_KEY);
+            }
+          } catch { /* Storage is optional. */ }
+        }} />Remember inputs in this browser</label>
+    </div>
     {mutation.error && <p className="error" role="alert">{mutation.error.message}</p>}
     {mutation.data !== undefined && <pre>{JSON.stringify(mutation.data, null, 2)}</pre>}
   </section>;
@@ -475,13 +553,122 @@ type DashboardState = {
   resources: { cpu_percent: number; ram_percent: number; uptime_seconds: number };
 };
 
+type RequestRecord = {
+  request_id: string; correlation_id: string; timestamp: number; documents_count: number;
+  model: string; device: string; latency_ms: number; cache_hits: number; status: string;
+  truncation_count: number;
+};
+
+type RequestDetail = RequestRecord & {
+  query?: string;
+  documents?: Array<{ id: string; text: string }>;
+  results?: Array<{ id: string; score: number; normalized_score: number | null; rank: number; text: string | null; cache_hit: boolean }>;
+};
+
+type RequestsResponse = { items: RequestRecord[]; total: number; size: number };
+
+async function fetchRetainedRequests(token: string): Promise<RequestRecord[]> {
+  const size = 100;
+  const firstPage = await api<RequestsResponse>(`admin/requests?page=1&size=${size}`, token);
+  const items = [...firstPage.items];
+  const pages = Math.ceil(firstPage.total / size);
+  for (let page = 2; page <= pages; page += 1) {
+    const response = await api<RequestsResponse>(
+      `admin/requests?page=${page}&size=${size}`,
+      token,
+    );
+    items.push(...response.items);
+  }
+  return items;
+}
+
+function RequestTable({ items, token, emptyMessage = 'No requests.' }: {
+  items: RequestRecord[]; token: string; emptyMessage?: string;
+}) {
+  const [expandedId, setExpandedId] = useState<string | null>(null);
+  const detail = useQuery({
+    queryKey: ['request-detail', expandedId],
+    queryFn: () => api<RequestDetail>(`admin/requests/${expandedId}`, token),
+    enabled: expandedId !== null,
+  });
+  if (items.length === 0) return <p>{emptyMessage}</p>;
+  return <div className="table-wrap"><table><thead><tr><th style={{width: 30}}></th>
+    <th>Request</th><th>Correlation</th><th>Time</th><th>Documents</th>
+    <th>Model / device</th><th>Latency</th><th>Cache</th><th>Status</th>
+  </tr></thead><tbody>
+    {items.map((item) => {
+      const expanded = expandedId === item.request_id;
+      const toggle = () => setExpandedId(expanded ? null : item.request_id);
+      return <React.Fragment key={`${item.request_id}-${item.timestamp}`}>
+        <tr className="request-row" onClick={toggle}>
+          <td className="expand-toggle"><button type="button"
+            aria-label={`${expanded ? 'Hide' : 'Show'} details for request ${item.request_id}`}
+            aria-expanded={expanded} onClick={(event) => { event.stopPropagation(); toggle(); }}>
+            {expanded ? '▼' : '▶'}
+          </button></td>
+          <td title={item.request_id}>{item.request_id.slice(0, 8)}</td>
+          <td title={item.correlation_id}>{item.correlation_id.slice(0, 12)}</td>
+          <td><small>{new Date(item.timestamp * 1000).toLocaleString()}</small></td>
+          <td>{item.documents_count}</td><td>{item.model}<br /><small>{item.device}</small></td>
+          <td>{item.latency_ms}ms</td><td>{item.cache_hits}</td><td>{item.status}</td>
+        </tr>
+        {expanded && <tr className="request-detail-row"><td colSpan={9}>
+          {detail.isLoading && <div className="skeleton">Loading details…</div>}
+          {detail.error && <p className="error">{detail.error.message}</p>}
+          {detail.data && <>
+            {detail.data.query && <div className="detail-section">
+              <h4>Query</h4><p className="detail-query">{detail.data.query}</p>
+            </div>}
+            {detail.data.results && detail.data.results.length > 0 && <div className="detail-section">
+              <h4>Results ({detail.data.results.length})</h4>
+              <table className="detail-table"><thead><tr>
+                <th>#</th><th>ID</th><th>Score</th><th>Normalized</th><th>Text</th><th>Cache</th>
+              </tr></thead><tbody>
+                {detail.data.results.map((result) => <tr key={result.id}>
+                  <td>{result.rank}</td><td>{result.id}</td><td>{result.score.toFixed(4)}</td>
+                  <td>{result.normalized_score?.toFixed(4) ?? '—'}</td>
+                  <td className="detail-text">{result.text ?? '—'}</td>
+                  <td>{result.cache_hit ? '✓' : ''}</td>
+                </tr>)}
+              </tbody></table>
+            </div>}
+            {detail.data.documents && detail.data.documents.length > 0 && <div className="detail-section">
+              <h4>Documents ({detail.data.documents.length})</h4>
+              <table className="detail-table"><thead><tr><th>ID</th><th>Text</th></tr></thead><tbody>
+                {detail.data.documents.map((document) => <tr key={document.id}>
+                  <td>{document.id}</td><td className="detail-text">{document.text}</td>
+                </tr>)}
+              </tbody></table>
+            </div>}
+            {!detail.data.query && !detail.data.results?.length && !detail.data.documents?.length &&
+              <div className="detail-section"><p className="muted-detail">
+                No request payload recorded (legacy record)
+              </p></div>}
+          </>}
+        </td></tr>}
+      </React.Fragment>;
+    })}
+  </tbody></table></div>;
+}
+
 function DashboardPanel({ token }: { token: string }) {
+  const [expandedBucket, setExpandedBucket] = useState<number | null>(null);
   const dashboard = useQuery({ queryKey: ['dashboard'],
     queryFn: () => api<DashboardState>('admin/dashboard', token), refetchInterval: 10000 });
   const metrics = useQuery({ queryKey: ['timeseries'],
     queryFn: () => api<{ points: Array<Record<string, number>> }>(
       'admin/metrics/timeseries?period_seconds=3600&bucket_seconds=60', token),
     refetchInterval: 10000 });
+  const bucketRequests = useQuery({
+    queryKey: ['dashboard-requests', expandedBucket],
+    queryFn: async () => {
+      const items = await fetchRetainedRequests(token);
+      const bucketStart = expandedBucket as number;
+      return items.filter((item) =>
+        item.timestamp >= bucketStart && item.timestamp < bucketStart + 60);
+    },
+    enabled: expandedBucket !== null,
+  });
   if (!dashboard.data) return <div className="skeleton">Loading…</div>;
   const data = dashboard.data;
   return <section><h2>Dashboard</h2><div className="cards">
@@ -494,10 +681,25 @@ function DashboardPanel({ token }: { token: string }) {
     <article><span>CPU</span><strong>{data.resources.cpu_percent}%</strong></article>
     <article><span>RAM</span><strong>{data.resources.ram_percent}%</strong></article>
   </div><h3>Last hour</h3><div className="metric-table">
-    {metrics.data?.points.length ? metrics.data.points.map((point) => <div key={point.timestamp}>
-      <time>{new Date(point.timestamp * 1000).toLocaleTimeString()}</time>
-      <span>{point.requests} requests</span><span>{point.latency_p95_ms.toFixed(1)}ms p95</span>
-      <span>{point.cache_hits} cache hits</span></div>) : <p>No requests in this period.</p>}
+    {metrics.data?.points.length ? metrics.data.points.map((point) => {
+      const expanded = expandedBucket === point.timestamp;
+      const detailsId = `dashboard-bucket-${point.timestamp}`;
+      return <React.Fragment key={point.timestamp}>
+        <button type="button" className="metric-row" aria-expanded={expanded}
+          aria-controls={detailsId}
+          onClick={() => setExpandedBucket(expanded ? null : point.timestamp)}>
+          <time>{new Date(point.timestamp * 1000).toLocaleTimeString()}</time>
+          <span>{point.requests} requests</span><span>{point.latency_p95_ms.toFixed(1)}ms p95</span>
+          <span>{point.cache_hits} cache hits</span>
+        </button>
+        {expanded && <div className="metric-detail" id={detailsId}>
+          {bucketRequests.isLoading && <div className="skeleton">Loading requests…</div>}
+          {bucketRequests.error && <p className="error">{bucketRequests.error.message}</p>}
+          {bucketRequests.data && <RequestTable items={bucketRequests.data} token={token}
+            emptyMessage="No retained requests for this minute." />}
+        </div>}
+      </React.Fragment>;
+    }) : <p>No requests in this period.</p>}
   </div></section>;
 }
 
@@ -525,13 +727,37 @@ type ModelCandidateResult = {
 };
 
 function fetchApi<T>(url: string, token: string, backend: string, options: RequestInit = {}): Promise<T> {
-  return api<T>(url, token, { ...options, headers: { ...options.headers, 'X-Backend': backend } });
+  const headers = backend ? { ...options.headers, 'X-Backend': backend } : options.headers;
+  return api<T>(url, token, { ...options, headers });
 }
 
 type BackendModels = { backendId: string; backendName: string; data: ModelsResponse };
-type BackendsResponse = { backends: Array<{ id: string; name: string; backend: string }>; model_map: Record<string, string> };
+type BackendDescriptor = {
+  id: string;
+  name: string;
+  backend: string;
+  available: boolean;
+};
 
-function ModelsPanel({ token }: { token: string }) {
+type BackendsResponse = {
+  default_backend: string;
+  backends: BackendDescriptor[];
+  model_map: Record<string, string>;
+};
+
+export function resolveBackendSelection(
+  saved: string,
+  registry: BackendsResponse,
+): string {
+  const available = registry.backends.filter((backend) => backend.available);
+  if (saved && available.some((backend) => backend.id === saved)) return saved;
+  if (available.some((backend) => backend.id === registry.default_backend)) {
+    return registry.default_backend;
+  }
+  return available[0]?.id || '';
+}
+
+function ModelsPanel({ token, selectedBackend }: { token: string; selectedBackend: string }) {
   const queryClient = useQueryClient();
   const [name, setName] = useState('');
   const [revision, setRevision] = useState('');
@@ -540,9 +766,20 @@ function ModelsPanel({ token }: { token: string }) {
   const allModels = useQuery({
     queryKey: ['models-all'],
     queryFn: async () => {
-      const resp = await fetch('/v1/backends');
-      const { backends, model_map } = await resp.json() as BackendsResponse;
-      setModelMap(model_map || {});
+      let backends: BackendDescriptor[] = [];
+      try {
+        const resp = await fetch('/v1/backends');
+        if (resp.ok) {
+          const registry = await resp.json() as Partial<BackendsResponse>;
+          backends = Array.isArray(registry.backends)
+            ? registry.backends.filter((backend) => backend.available)
+            : [];
+          setModelMap(isRecord(registry.model_map) ? registry.model_map as Record<string, string> : {});
+        }
+      } catch { /* Discovery is optional in a single-backend deployment. */ }
+      if (backends.length === 0) {
+        backends = [{ id: '', name: 'Configured backend', backend: '', available: true }];
+      }
       const results: BackendModels[] = [];
       for (const b of backends) {
         try {
@@ -579,7 +816,7 @@ function ModelsPanel({ token }: { token: string }) {
     return body;
   };
 
-  const resolveBackend = () => backendForModel(candidateName) || _activeBackend || 'legacy';
+  const resolveBackend = () => backendForModel(candidateName) || _activeBackend;
 
   const check = useMutation({
     mutationFn: () => fetchApi<ModelCandidateResult>('admin/models/check', token, resolveBackend(), {
@@ -642,6 +879,8 @@ function ModelsPanel({ token }: { token: string }) {
     && (candidateStatus === null || candidateStatus === 'ready');
 
   const operationError = check.error || load.error || activate.error || rollback.error;
+  const selectedRuntime = allModels.data?.find(({ backendId }) =>
+    backendId === selectedBackend || (selectedBackend === '' && allModels.data?.length === 1));
 
   if (allModels.isLoading) return <div className="skeleton">Loading…</div>;
 
@@ -665,6 +904,14 @@ function ModelsPanel({ token }: { token: string }) {
 
   return <section>
     <h2>Models</h2>
+    <p className="routing-summary">
+      <strong>Used by console requests now:</strong>{' '}
+      {selectedRuntime
+        ? `${selectedRuntime.data.active_model} via ${selectedRuntime.backendName}`
+        : 'no available backend selected'}.
+      {' '}Each backend container loads its own active model; loaded models in other containers are
+      ready alternatives, not the current routing target.
+    </p>
 
     <div className="form-grid">
       <label>
@@ -755,15 +1002,22 @@ function ModelsPanel({ token }: { token: string }) {
       </p>}
 
     <div className="run-list">
-      {(allModels.data || []).map(({ backendId, backendName, data }) =>
+      {(allModels.data || []).map(({ backendId, backendName, data }) => {
+        const selected = backendId === selectedBackend ||
+          (selectedBackend === '' && allModels.data?.length === 1);
+        return (
         <React.Fragment key={backendId}>
-          <h3>{backendName} <small>({backendId})</small></h3>
+          <h3>{backendName} <small>({backendId || 'single backend'})</small>
+            {selected && <span className="status-badge selected">Selected for requests</span>}
+          </h3>
           {data.models.map((model) =>
             <article key={`${backendId}-${model.name}`} className={model.loaded ? 'active-model' : ''}>
               <header>
                 <strong>{model.name}</strong>
                 <span className={`status-badge ${model.loaded ? 'active' : 'available'}`}>
-                  {model.loaded ? '● Active · ready' : model.status}
+                  {model.loaded
+                    ? selected ? '● Used now · ready' : '● Loaded here · ready'
+                    : model.status}
                 </span>
               </header>
               <dl className="details">
@@ -774,80 +1028,20 @@ function ModelsPanel({ token }: { token: string }) {
                 <div><dt>Average latency</dt><dd>{model.average_latency_ms?.toFixed(1) || 'No data'} ms</dd></div>
               </dl>
             </article>)}
-        </React.Fragment>)}
+        </React.Fragment>);})}
     </div>
   </section>;
 }
 
-type RequestRecord = {
-  request_id: string; correlation_id: string; timestamp: number; documents_count: number;
-  model: string; device: string; latency_ms: number; cache_hits: number; status: string;
-  truncation_count: number;
-};
-
-type RequestDetail = RequestRecord & {
-  query?: string;
-  documents?: Array<{ id: string; text: string }>;
-  results?: Array<{ id: string; score: number; normalized_score: number | null; rank: number; text: string | null; cache_hit: boolean }>;
-};
-
 function RequestsPanel({ token }: { token: string }) {
   const [page, setPage] = useState(1);
-  const [expandedId, setExpandedId] = useState<string | null>(null);
   const query = useQuery({ queryKey: ['requests', page],
-    queryFn: () => api<{ items: RequestRecord[]; total: number; size: number }>(
+    queryFn: () => api<RequestsResponse>(
       `admin/requests?page=${page}&size=20`, token) });
-  const detail = useQuery({
-    queryKey: ['request-detail', expandedId],
-    queryFn: () => api<RequestDetail>(`admin/requests/${expandedId}`, token),
-    enabled: expandedId !== null,
-  });
   if (!query.data) return <div className="skeleton">Loading…</div>;
   return <section><header><h2>Requests</h2><span>{query.data.total} retained technical records</span></header>
-    <div className="table-wrap"><table><thead><tr><th style={{width: 30}}></th><th>Request</th><th>Correlation</th><th>Time</th><th>Documents</th>
-      <th>Model / device</th><th>Latency</th><th>Cache</th><th>Status</th></tr></thead><tbody>
-      {query.data.items.map((item) => <React.Fragment key={`${item.request_id}-${item.timestamp}`}>
-        <tr className="request-row" onClick={() => setExpandedId(expandedId === item.request_id ? null : item.request_id)}>
-          <td className="expand-toggle">{expandedId === item.request_id ? '▼' : '▶'}</td>
-          <td title={item.request_id}>{item.request_id.slice(0, 8)}</td>
-          <td title={item.correlation_id}>{item.correlation_id.slice(0, 12)}</td>
-          <td><small>{new Date(item.timestamp * 1000).toLocaleString()}</small></td>
-          <td>{item.documents_count}</td><td>{item.model}<br /><small>{item.device}</small></td>
-          <td>{item.latency_ms}ms</td><td>{item.cache_hits}</td><td>{item.status}</td></tr>
-        {expandedId === item.request_id && <tr className="request-detail-row"><td colSpan={9}>
-          {detail.isLoading && <div className="skeleton">Loading details…</div>}
-          {detail.error && <p className="error">{detail.error.message}</p>}
-          {detail.data && <>
-            {detail.data.query && <div className="detail-section">
-              <h4>Query</h4><p className="detail-query">{detail.data.query}</p>
-            </div>}
-            {detail.data.results && detail.data.results.length > 0 && <div className="detail-section">
-              <h4>Results ({detail.data.results.length})</h4>
-              <table className="detail-table"><thead><tr>
-                <th>#</th><th>ID</th><th>Score</th><th>Normalized</th><th>Text</th><th>Cache</th>
-              </tr></thead><tbody>
-                {detail.data.results.map((r) => <tr key={r.id}>
-                  <td>{r.rank}</td><td>{r.id}</td><td>{r.score.toFixed(4)}</td>
-                  <td>{r.normalized_score?.toFixed(4) ?? '—'}</td>
-                  <td className="detail-text">{r.text ?? '—'}</td>
-                  <td>{r.cache_hit ? '✓' : ''}</td>
-                </tr>)}
-              </tbody></table>
-            </div>}
-            {detail.data.documents && detail.data.documents.length > 0 && <div className="detail-section">
-              <h4>Documents ({detail.data.documents.length})</h4>
-              <table className="detail-table"><thead><tr><th>ID</th><th>Text</th></tr></thead><tbody>
-                {detail.data.documents.map((d) => <tr key={d.id}>
-                  <td>{d.id}</td><td className="detail-text">{d.text}</td>
-                </tr>)}
-              </tbody></table>
-            </div>}
-            {!detail.data.query && !detail.data.results?.length && !detail.data.documents?.length &&
-              <div className="detail-section"><p style={{color: '#9fb3ad', margin: 0}}>No request payload recorded (legacy record)</p></div>}
-          </>}
-        </td></tr>}
-      </React.Fragment>)}
-    </tbody></table></div><div className="actions"><button className="secondary" disabled={page === 1}
+    <RequestTable items={query.data.items} token={token} />
+    <div className="actions"><button className="secondary" disabled={page === 1}
       onClick={() => setPage(page - 1)}>Previous</button><span>Page {page}</span>
       <button className="secondary" disabled={page * query.data.size >= query.data.total}
         onClick={() => setPage(page + 1)}>Next</button></div></section>;
@@ -934,12 +1128,34 @@ export const BACKENDS_STORAGE_KEY = 'reranker.activeBackend';
 
 export function App() {
   const [token, setToken] = useState(() => sessionStorage.getItem('adminToken') || '');
-  const [backend, setBackend] = useState(() => sessionStorage.getItem(BACKENDS_STORAGE_KEY) || 'jina');
+  const [backend, setBackend] = useState('');
   useEffect(() => { setActiveBackend(backend); }, [backend]);
-  const [availableBackends, setAvailableBackends] = useState<Array<{ id: string; name: string; backend: string }>>([]);
-  useEffect(() => { sessionStorage.setItem(BACKENDS_STORAGE_KEY, backend); }, [backend]);
+  const [availableBackends, setAvailableBackends] = useState<BackendDescriptor[]>([]);
   useEffect(() => {
-    fetch('/v1/backends').then(r => r.json()).then(d => setAvailableBackends(d.backends || [])).catch(() => {});
+    if (backend) sessionStorage.setItem(BACKENDS_STORAGE_KEY, backend);
+    else sessionStorage.removeItem(BACKENDS_STORAGE_KEY);
+  }, [backend]);
+  useEffect(() => {
+    let active = true;
+    fetch('/v1/backends')
+      .then(async (response) => {
+        if (!response.ok) throw new Error(`Backend discovery failed with HTTP ${response.status}`);
+        return response.json() as Promise<BackendsResponse>;
+      })
+      .then((registry) => {
+        if (!active) return;
+        const discovered = Array.isArray(registry.backends) ? registry.backends : [];
+        const normalized = { ...registry, backends: discovered };
+        const saved = sessionStorage.getItem(BACKENDS_STORAGE_KEY) || '';
+        setAvailableBackends(discovered);
+        setBackend(resolveBackendSelection(saved, normalized));
+      })
+      .catch(() => {
+        if (!active) return;
+        setAvailableBackends([]);
+        setBackend('');
+      });
+    return () => { active = false; };
   }, []);
   const [section, setSection] = useState<Section>(() => {
     const hash = decodeURIComponent(location.hash.slice(1));
@@ -957,7 +1173,7 @@ export function App() {
   else if (section === 'Runtime') content = <RuntimePanel token={token} />;
   else if (section === 'Cache') content = <CachePanel token={token} />;
   else if (section === 'Benchmarks') content = <BenchmarksPanel token={token} />;
-  else if (section === 'Models') content = <ModelsPanel token={token} />;
+  else if (section === 'Models') content = <ModelsPanel token={token} selectedBackend={backend} />;
   else if (section === 'Requests') content = <RequestsPanel token={token} />;
   else if (section === 'System Health') content = <SystemHealthPanel token={token} />;
   else if (section === 'Settings') content = <SettingsPanel token={token} />;
@@ -965,9 +1181,9 @@ export function App() {
   else content = <DataView section={section} token={token} />;
   return <div className="shell"><aside><div className="brand">RR <span>Console</span></div>
     {availableBackends.length > 1 && <div className="backend-selector">
-      <label>Backend
+      <label>Backend for console requests
         <select value={backend} onChange={(e) => setBackend(e.target.value)}>
-          {availableBackends.map(b => <option key={b.id} value={b.id}>{b.id.charAt(0).toUpperCase() + b.id.slice(1)}</option>)}
+          {availableBackends.filter(b => b.available).map(b => <option key={b.id} value={b.id}>{b.id.charAt(0).toUpperCase() + b.id.slice(1)}</option>)}
         </select>
       </label>
     </div>}
